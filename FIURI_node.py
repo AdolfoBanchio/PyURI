@@ -39,7 +39,7 @@ class FIURI_node(Nodes):
         traces_additive: bool = False,
         tc_trace: Union[float, torch.Tensor] = 20.0,
         trace_scale: Union[float, torch.Tensor] = 1.0,
-        sum_input: bool = True,
+        sum_input: bool = False,
         initial_in_state: Optional[float] = 0.0,   # scalar default
         initial_out_state: Optional[float] = 0.0,  # scalar default
         initial_threshold: Optional[float] = 1.0,
@@ -70,7 +70,7 @@ class FIURI_node(Nodes):
             traces_additive=traces_additive,
             tc_trace=tc_trace,
             trace_scale=trace_scale,
-            sum_input=False,
+            sum_input=sum_input,
             **kwargs,
         )
         # --- learnable per-neuron parameters (shape: (n,))
@@ -82,7 +82,7 @@ class FIURI_node(Nodes):
 
         # --- persistent state buffers (allocated lazily with correct batch/device/dtype)
         self.register_buffer("in_state", torch.tensor(initial_in_state, dtype=torch.float))  # E (batch, n)
-        self.register_buffer("s", torch.tensor(initial_out_state, dtype=float))  # O/output (batch, n) — BindsNET convention
+        self.register_buffer("out_state", torch.tensor(initial_out_state, dtype=torch.float))  # O/output (batch, n) — BindsNET convention
 
         # defaults for initial states (scalars stored just to use at first allocation)
         self._init_E = float(initial_in_state)
@@ -99,8 +99,12 @@ class FIURI_node(Nodes):
         super().set_batch_size(batch_size)   # keeps BindsNET’s s/x/summed in sync
         device = self.threshold.device       # or a stored self._device
         dtype  = self.threshold.dtype
+        shape  = (batch_size, self.shape)
 
-        self._ensure_state(batch_size, device, dtype)
+        if self.in_state is None or self.in_state.shape != shape:
+            self.in_state = torch.full(shape, self._init_E, device=device, dtype=dtype)
+        if self.out_state is None or self.out_state.shape != shape:
+            self.out_state = torch.full(shape, self._init_O, device=device, dtype=dtype)
 
     def _ensure_state(self, batch_size: int, device, dtype) -> None:
         """
@@ -120,80 +124,101 @@ class FIURI_node(Nodes):
         else:
             self.in_state = self.in_state.to(device=device, dtype=dtype)
 
-        if self.s.numel() == 0 or self.s.shape != full_shape:
-            self.s = torch.full(full_shape, self._init_O, device=device, dtype=dtype)
+        if self.out_state.numel() == 0 or self.out_state.shape != full_shape:
+            self.out_state = torch.full(full_shape, self._init_O, device=device, dtype=dtype)
         else:
-            self.s = self.s.to(device=device, dtype=dtype)
+            self.out_state = self.out_state.to(device=device, dtype=dtype)
 
     def forward(self, x: torch.Tensor) -> None:
         """
         One simulation step.
         x: presynaptic input CURRENT to this layer at this step.
+        We expect x to be -> (batch, n, 3) where:
+                    - x[..., 0] = O_exc, x[..., 1] = O_inh, x[..., 2] = O_gj
+                    - batch: numbers of samples procesed in parallel.
         """
-        batch = x.size(0) if x.dim() > 0 else 1
-        device = x.device
-        dtype = x.float().dtype
-
-        # Ensure buffers are ready before letting the parent accumulate inputs.
-        self._ensure_state(batch, device, dtype)
-
-        # Keep base behavior (traces and optional input pre-sum)
+        # Keep base behavior (traces), sum_input always False, because we are using 3 channels
         super().forward(x)
+        
+            # Normalize x shape to (batch, n, 3)
+        if x.dim() == 2:  # (batch, 3) when n == 1
+            x = x.unsqueeze(1)  # -> (batch, 1, 3)
+        assert x.size(-1) == 3, "Expected last dim=3 for [exc, inh, gj]"
 
-        # Get the input current for this step:
-        # Previous stage manipulates the presynaptic conncetions
-        # x "arrives" with all the currents summed.
-        input_current = x
-
-        # Ensure state tensors match batch/device/dtype (covers sum_input=False case)
-        self._ensure_state(batch, input_current.device, input_current.dtype)
+        batch = x.size(0)
+        # Ensure buffers are allocated with correct shape before any size() access
+        if (self.out_state is None) or (self.out_state.ndim == 0) or (self.out_state.size(0) != batch):
+            self.set_batch_size(batch)
 
         # Broadcast learnable params to (batch, n)
         # to match input_current shape for elementwise ops
         # using .to() to ensure correct device/dtype
         # getting the treshold and decay values from this step
-        T = self.threshold.to(input_current).unsqueeze(0).expand(batch, -1)
-        d = self.decay.to(input_current).unsqueeze(0).expand(batch, -1)
+        T = self.threshold.to(x).unsqueeze(0).expand(batch, -1) # (batch, n)
+        d = self.decay.to(x).unsqueeze(0).expand(batch, -1) # (batch, n)
 
+        exc = x[..., 0] # (batch, n)
+        inh = x[..., 1] # (batch, n)
+        gj  = x[..., 2] # (batch, n)
+
+        # chemical influcene +exc - inh 
+        # (assumes the input arrives with all the corresponing inputs summed and weighted)
+        print(f'inh inf:{inh}')
+        print(f'exc inf:{exc}')
+        chem_influence = +exc - inh
+
+        # TODO: verify if equality must be checked ASK!
+        gj_sign = torch.where(gj > self.in_state, 1.0, 
+                            torch.where(gj < self.in_state, -1.0, 0.0))
+        gj_curr = gj_sign * gj
+        print(f'gj inf inf:{gj_curr}')
+
+        input_current = chem_influence + gj_curr 
+        print('current influence (sum Ij):', input_current)
+
+        # Compute the stimulus coming trhough the neuron
         # --- S_n = E_n + sum(I_jn)
         S = self.in_state + input_current
-
+        print('Stimulus (instate + Ij)', S)
         # Copying from Ariel code: TODO: ask about this
-        # Optional clamp (keeps numerics in check; remove if not desired)
+        # clamp (keeps numerics in check; remove if not desired)
         S = torch.clamp(S, min=self.clamp_min, max=self.clamp_max)
 
         # Conditions
         gt_thresh = S > T
         # Avoid exact float equality; use tolerance if you truly need equality.
-        eq_S_E    = torch.isclose(S, self.in_state, rtol=1e-6, atol=1e-6)
+        eq_S_E    = S == self.in_state
         le_thresh = ~gt_thresh
 
         # Case 1: S > T  -->  O = S - T;  E = S - T
-        O_case1 = S - T
-        E_case1 = S - T
+        O_c1 = S - T
+        E_c1 = S - T
 
         # Case 2: S <= T and S == E  -->  O = 0;  E = E - d
-        O_case2 = torch.zeros_like(S)
-        E_case2 = self.in_state - d
+        O_c2 = torch.zeros_like(S)
+        E_c2 = self.in_state - d
 
         # Case 3: otherwise          -->  O = 0;  E = S
-        O_case3 = torch.zeros_like(S)
-        E_case3 = S
+        O_c3 = torch.zeros_like(S)
+        E_c3 = S
 
         # Build masks
         mask1 = gt_thresh
         mask2 = le_thresh & eq_S_E
+
         # Select per case
-        new_O = torch.where(mask1, O_case1, torch.where(mask2, O_case2, O_case3))
-        new_E = torch.where(mask1, E_case1, torch.where(mask2, E_case2, E_case3))
+        new_O = torch.where(mask1, O_c1, torch.where(mask2, O_c2, O_c3))
+        new_E = torch.where(mask1, E_c1, torch.where(mask2, E_c2, E_c3))
 
         # Assign
-        self.s        = new_O
-        self.in_state = new_E
+        self.out_state = new_O
+        self.in_state  = new_E
 
         # If we used the pre-sum buffer, zero it for next step
         if self.sum_input and (self.summed is not None):
             self.summed.zero_()
+        
+        return S
 
     def reset_state_variables(self) -> None:
         # Reset neuron states at episode boundaries

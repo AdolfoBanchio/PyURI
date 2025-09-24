@@ -19,6 +19,7 @@ from typing import Optional, Iterable, Union
 from FIURI_node import FIURI_node
 import matplotlib.pyplot as plt
 
+
 time_steps = 50
 
 # Create FIURI node
@@ -32,19 +33,24 @@ fiuri = FIURI_node(
     learn_decay=False,
     clamp_min=-10.0,
     clamp_max=10.0,
+    sum_input=False
 )
 
 
 # Record states
-in_states = torch.zeros(time_steps)
-out_states = torch.zeros(time_steps)
-current_trace = torch.zeros((time_steps,3))
+in_states = torch.zeros(time_steps, dtype=torch.float32)
+out_states = torch.zeros(time_steps, dtype=torch.float32)
+influence_trace = torch.zeros(time_steps, dtype=torch.float32)
+
 # Run simulation
 print("Running simulation...")
 
+
 for t in range(time_steps):
+    print(f"==== Time step {t} ====")
+
     if t<10:
-        inh_current = -0.5
+        inh_current=0.5
         exc_current=0.0
         gj_current=0.0
     elif t<20:
@@ -60,17 +66,21 @@ for t in range(time_steps):
         exc_current=0.0
         gj_current=0.0
 
-    currents = [inh_current, exc_current, gj_current]
-    current = torch.tensor(sum(currents)).view(1,1)  # shape (batch, n)
-    
-    # save each current value for plotting
-    current_trace[t] = torch.tensor(currents)
-    
+    # create tensor with dimentions (batch, n, 3)
+    # here, batch: one sample, n=1 one neuron
+    currents = torch.tensor([[[exc_current, inh_current, gj_current]]], dtype=torch.float32)
+
     # Step FIURI node
-    fiuri.forward(current)
+    stimulus = fiuri.forward(currents)
+    influence_trace[t] = stimulus.item()
+
+    output_state = fiuri.s.item()
+    internal_state = fiuri.in_state.item()
+    print('Output state (O):', output_state)
+    print('Internal state (O):', internal_state)
     # Record states
-    in_states[t] = fiuri.in_state.item()
-    out_states[t] = fiuri.s.item()
+    in_states[t] = internal_state
+    out_states[t] = output_state
 
 # Plot results:
 # plot 1: internal state and out state vs time steps
@@ -79,18 +89,19 @@ fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(10, 8))
 ax1.plot(in_states.numpy(), label='Internal State (E)', color='blue')
 ax1.plot(out_states.numpy(), label='Output State (S)', color='orange')
 ax1.axhline(y=fiuri.threshold.item(), color='red', linestyle='--', label='Threshold (T)')
-ax1.set_title('FIURI Neuron Dynamics')
+ax1.set_title('PyURI Neuron Dynamics')
 ax1.set_xlabel('Time Steps')
 ax1.set_ylabel('State Value')
 ax1.legend()
 ax1.grid()
 
-ax2.plot(current_trace.numpy())
+ax2.plot(influence_trace.numpy())
 ax2.set_title('Input Currents')
 ax2.set_xlabel('Time Steps')
 ax2.set_ylabel('Current Value')
-ax2.legend(['Inhibitory', 'Excitatory', 'Gap Junction'])
+ax2.legend(['Stimulus (S)'])
 ax2.grid()
+
 plt.tight_layout()
 plt.show()
-plt.savefig('fiuri_dynamics.png')
+plt.savefig('scripts_outs/pyuri_dynamics.png')
