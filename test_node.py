@@ -18,13 +18,18 @@ import torch
 from typing import Optional, Iterable, Union
 from FIURI_node import FIURI_node
 import matplotlib.pyplot as plt
-
+from bindsnet.network.nodes import Input, LIFNodes
+from bindsnet.network.topology import Connection
+from bindsnet.network.topology_features import Weight, Bias
 
 time_steps = 50
 
+# one neuron as source, 3 channels because has 3 junctions with target 
+source_layer = Input(shape=(1,3)) 
+
 # Create FIURI node
 fiuri = FIURI_node(
-    n=1,
+    num_cells=1,
     initial_in_state=0.0,
     initial_out_state=0.0,
     initial_threshold=1.0,
@@ -33,9 +38,15 @@ fiuri = FIURI_node(
     learn_decay=False,
     clamp_min=-10.0,
     clamp_max=10.0,
-    sum_input=False
+    sum_input=True
 )
-
+# Identity connection: input channel k -> Fiuri channel k
+# Shapes are flattened for weights
+W = torch.eye(3) # 3x3 identity
+connection = Connection(
+        source=source_layer,
+        target=fiuri,
+)
 
 # Record states
 in_states = torch.zeros(time_steps, dtype=torch.float32)
@@ -45,26 +56,26 @@ influence_trace = torch.zeros(time_steps, dtype=torch.float32)
 # Run simulation
 print("Running simulation...")
 
-
+fiuri.set_batch_size(1)
 for t in range(time_steps):
     print(f"==== Time step {t} ====")
 
     if t<10:
-        inh_current=0.5
-        exc_current=0.0
-        gj_current=0.0
+        inh_current=0.5 + t*0.1
+        exc_current=0.1 - t*0.1
+        gj_current=0.1 - t*0.1
     elif t<20:
-        inh_current=0.0
-        exc_current=1.5
-        gj_current=0.0
+        inh_current=0.1 + t*0.05
+        exc_current=1.5 - t*0.05
+        gj_current=0.1 - t*0.05
     elif t<30:
-        inh_current=0.0
-        exc_current=0.0
+        inh_current=0.1 
+        exc_current=0.1
         gj_current=1.5
     else:
-        inh_current=0.0
-        exc_current=0.0
-        gj_current=0.0
+        inh_current=0.1 + t*0.1
+        exc_current=0.1 + t*0.1
+        gj_current=0.1 + t*0.1
 
     # create tensor with dimentions (batch, n, 3)
     # here, batch: one sample, n=1 one neuron
@@ -74,7 +85,8 @@ for t in range(time_steps):
     stimulus = fiuri.forward(currents)
     influence_trace[t] = stimulus.item()
 
-    output_state = fiuri.s.item()
+    print(fiuri.out_state)
+    output_state = fiuri.out_state.item()
     internal_state = fiuri.in_state.item()
     print('Output state (O):', output_state)
     print('Internal state (O):', internal_state)

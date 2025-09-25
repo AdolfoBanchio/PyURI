@@ -33,13 +33,12 @@ class FIURI_node(Nodes):
     """
     def __init__(
         self,
-        n: Optional[int] = None,
-        shape: Optional[Iterable[int]] = None,
+        num_cells: Optional[int] = None,
         traces: bool = False,
         traces_additive: bool = False,
         tc_trace: Union[float, torch.Tensor] = 20.0,
         trace_scale: Union[float, torch.Tensor] = 1.0,
-        sum_input: bool = False,
+        sum_input: bool = True,
         initial_in_state: Optional[float] = 0.0,   # scalar default
         initial_out_state: Optional[float] = 0.0,  # scalar default
         initial_threshold: Optional[float] = 1.0,
@@ -64,8 +63,7 @@ class FIURI_node(Nodes):
         """
 
         super().__init__(
-            n=n,
-            shape=shape,
+            shape=(num_cells,3),
             traces=traces,
             traces_additive=traces_additive,
             tc_trace=tc_trace,
@@ -73,9 +71,12 @@ class FIURI_node(Nodes):
             sum_input=sum_input,
             **kwargs,
         )
+
+        # save num of cells
+        self.num_cells = num_cells
         # --- learnable per-neuron parameters (shape: (n,))
-        T_init = torch.full((self.n,), float(initial_threshold), dtype=torch.float32)
-        d_init = torch.full((self.n,), float(initial_decay),    dtype=torch.float32)
+        T_init = torch.full((num_cells,), float(initial_threshold), dtype=torch.float32)
+        d_init = torch.full((num_cells,), float(initial_decay),    dtype=torch.float32)
 
         self.threshold = nn.Parameter(T_init) if learn_threshold else T_init
         self.decay     = nn.Parameter(d_init) if learn_decay     else d_init
@@ -94,41 +95,18 @@ class FIURI_node(Nodes):
 
     def _compute_decays(self) -> None:
         pass
+
+    def set_batch_size(self, batch_size) -> None:
+        super().set_batch_size(batch_size)
         
-    def set_batch_size(self, batch_size: int) -> None:
-        super().set_batch_size(batch_size)   # keeps BindsNET’s s/x/summed in sync
-        device = self.threshold.device       # or a stored self._device
-        dtype  = self.threshold.dtype
-        shape  = (batch_size, self.shape)
-
+        dev, dt = self.threshold.device, self.threshold.dtype
+        shape = (batch_size, self.num_cells)
         if self.in_state is None or self.in_state.shape != shape:
-            self.in_state = torch.full(shape, self._init_E, device=device, dtype=dtype)
+            self.in_state = torch.full(shape, self._init_E, device=dev, dtype=dt)
         if self.out_state is None or self.out_state.shape != shape:
-            self.out_state = torch.full(shape, self._init_O, device=device, dtype=dtype)
-
-    def _ensure_state(self, batch_size: int, device, dtype) -> None:
-        """
-        Make sure internal buffers match the current batch shape/device/dtype.
-        """
-        full_shape = (batch_size, *self.shape)
-
-        if self.sum_input:
-            needs_resize = self.summed.numel() == 0 or self.summed.shape != full_shape
-            if needs_resize:
-                self.summed = torch.zeros(full_shape, device=device, dtype=dtype)
-            else:
-                self.summed = self.summed.to(device=device, dtype=dtype)
-
-        if self.in_state.numel() == 0 or self.in_state.shape != full_shape:
-            self.in_state = torch.full(full_shape, self._init_E, device=device, dtype=dtype)
-        else:
-            self.in_state = self.in_state.to(device=device, dtype=dtype)
-
-        if self.out_state.numel() == 0 or self.out_state.shape != full_shape:
-            self.out_state = torch.full(full_shape, self._init_O, device=device, dtype=dtype)
-        else:
-            self.out_state = self.out_state.to(device=device, dtype=dtype)
-
+            self.out_state = torch.full(shape, self._init_O, device=dev, dtype=dt)
+        
+    
     def forward(self, x: torch.Tensor) -> None:
         """
         One simulation step.
@@ -137,29 +115,28 @@ class FIURI_node(Nodes):
                     - x[..., 0] = O_exc, x[..., 1] = O_inh, x[..., 2] = O_gj
                     - batch: numbers of samples procesed in parallel.
         """
+        batch = x.shape[0]
+        print(x.shape)
         # Keep base behavior (traces), sum_input always False, because we are using 3 channels
         super().forward(x)
         
-            # Normalize x shape to (batch, n, 3)
-        if x.dim() == 2:  # (batch, 3) when n == 1
-            x = x.unsqueeze(1)  # -> (batch, 1, 3)
-        assert x.size(-1) == 3, "Expected last dim=3 for [exc, inh, gj]"
-
-        batch = x.size(0)
-        # Ensure buffers are allocated with correct shape before any size() access
-        if (self.out_state is None) or (self.out_state.ndim == 0) or (self.out_state.size(0) != batch):
-            self.set_batch_size(batch)
-
         # Broadcast learnable params to (batch, n)
         # to match input_current shape for elementwise ops
         # using .to() to ensure correct device/dtype
         # getting the treshold and decay values from this step
-        T = self.threshold.to(x).unsqueeze(0).expand(batch, -1) # (batch, n)
-        d = self.decay.to(x).unsqueeze(0).expand(batch, -1) # (batch, n)
+        T = self.threshold.view(1, -1).to(self.in_state) # (1, num_cells) -> (batch, num_cells)
+        d = self.decay.view(1, -1).to(self.in_state) # (batch, n)
+        
+        assert T.shape[1] == self.num_cells and d.shape[1] == self.num_cells
 
-        exc = x[..., 0] # (batch, n)
-        inh = x[..., 1] # (batch, n)
-        gj  = x[..., 2] # (batch, n)
+        print(d)
+        
+        exc = self.summed[..., 0] # (batch, n)
+        inh = self.summed[..., 1] # (batch, n)
+        gj  = self.summed[..., 2] # (batch, n)
+
+        for name, t in [('exc', exc), ('inh', inh), ('gj', gj)]:
+            assert t.shape == (batch, self.num_cells), (name, t.shape)
 
         # chemical influcene +exc - inh 
         # (assumes the input arrives with all the corresponing inputs summed and weighted)
@@ -168,8 +145,13 @@ class FIURI_node(Nodes):
         chem_influence = +exc - inh
 
         # TODO: verify if equality must be checked ASK!
+        # V1: Ignores equallity between the input of the Gj and the Internal state
         gj_sign = torch.where(gj > self.in_state, 1.0, 
                             torch.where(gj < self.in_state, -1.0, 0.0))
+        
+        # V2: takes into the account the equality
+        #gj_sign = torch.where(gj >= self.in_state, 1.0, -1.0)
+        
         gj_curr = gj_sign * gj
         print(f'gj inf inf:{gj_curr}')
 
@@ -179,11 +161,12 @@ class FIURI_node(Nodes):
         # Compute the stimulus coming trhough the neuron
         # --- S_n = E_n + sum(I_jn)
         S = self.in_state + input_current
-        print('Stimulus (instate + Ij)', S)
         # Copying from Ariel code: TODO: ask about this
         # clamp (keeps numerics in check; remove if not desired)
         S = torch.clamp(S, min=self.clamp_min, max=self.clamp_max)
 
+        
+        print('Stimulus (instate + Ij)', S)
         # Conditions
         gt_thresh = S > T
         # Avoid exact float equality; use tolerance if you truly need equality.
@@ -226,6 +209,9 @@ class FIURI_node(Nodes):
             self.in_state.zero_()
         if self.s is not None:
             self.s.zero_()
+        if self.out_state is not None:
+            self.out_state.zero_()
+        
         # Keep traces reset from parent if enabled
         super().reset_state_variables()
         # If using summed input, zero it too

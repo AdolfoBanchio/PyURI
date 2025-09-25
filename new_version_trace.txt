@@ -1,0 +1,551 @@
+Running simulation...
+==== Time step 0 ====
+torch.Size([1, 1, 3])
+tensor([[0.1000]])
+inh inf:tensor([[0.5000]])
+exc inf:tensor([[0.1000]])
+gj inf inf:tensor([[0.1000]])
+current influence (sum Ij): tensor([[-0.3000]])
+Stimulus (instate + Ij) tensor([[-0.3000]])
+tensor([[0.]])
+Output state (O): 0.0
+Internal state (O): -0.30000001192092896
+==== Time step 1 ====
+torch.Size([1, 1, 3])
+tensor([[0.1000]])
+inh inf:tensor([[0.6000]])
+exc inf:tensor([[0.]])
+gj inf inf:tensor([[0.]])
+current influence (sum Ij): tensor([[-0.6000]])
+Stimulus (instate + Ij) tensor([[-0.9000]])
+tensor([[0.]])
+Output state (O): 0.0
+Internal state (O): -0.9000000357627869
+==== Time step 2 ====
+torch.Size([1, 1, 3])
+tensor([[0.1000]])
+inh inf:tensor([[0.7000]])
+exc inf:tensor([[-0.1000]])
+gj inf inf:tensor([[-0.1000]])
+current influence (sum Ij): tensor([[-0.9000]])
+Stimulus (instate + Ij) tensor([[-1.8000]])
+tensor([[0.]])
+Output state (O): 0.0
+Internal state (O): -1.8000000715255737
+==== Time step 3 ====
+torch.Size([1, 1, 3])
+tensor([[0.1000]])
+inh inf:tensor([[0.8000]])
+exc inf:tensor([[-0.2000]])
+gj inf inf:tensor([[-0.2000]])
+current influence (sum Ij): tensor([[-1.2000]])
+Stimulus (instate + Ij) tensor([[-3.]])
+tensor([[0.]])
+Output state (O): 0.0
+Internal state (O): -3.0
+==== Time step 4 ====
+torch.Size([1, 1, 3])
+tensor([[0.1000]])
+inh inf:tensor([[0.9000]])
+exc inf:tensor([[-0.3000]])
+gj inf inf:tensor([[-0.3000]])
+current influence (sum Ij): tensor([[-1.5000]])
+Stimulus (instate + Ij) tensor([[-4.5000]])
+tensor([[0.]])
+Output state (O): 0.0
+Internal state (O): -4.5
+==== Time step 5 ====
+torch.Size([1, 1, 3])
+tensor([[0.1000]])
+inh inf:tensor([[1.]])
+exc inf:tensor([[-0.4000]])
+gj inf inf:tensor([[-0.4000]])
+current influence (sum Ij): tensor([[-1.8000]])
+Stimulus (instate + Ij) tensor([[-6.3000]])
+tensor([[0.]])
+Output state (O): 0.0
+Internal state (O): -6.300000190734863
+==== Time step 6 ====
+torch.Size([1, 1, 3])
+tensor([[0.1000]])
+inh inf:tensor([[1.1000]])
+exc inf:tensor([[-0.5000]])
+gj inf inf:tensor([[-0.5000]])
+current influence (sum Ij): tensor([[-2.1000]])
+Stimulus (instate + Ij) tensor([[-8.4000]])
+tensor([[0.]])
+Output state (O): 0.0
+Internal state (O): -8.399999618530273
+==== Time step 7 ====
+torch.Size([1, 1, 3])
+tensor([[0.1000]])
+inh inf:tensor([[1.2000]])
+exc inf:tensor([[-0.6000]])
+gj inf inf:tensor([[-0.6000]])
+current influence (sum Ij): tensor([[-2.4000]])
+Stimulus (instate + Ij) tensor([[-10.]])
+tensor([[0.]])
+Output state (O): 0.0
+Internal state (O): -10.0
+==== Time step 8 ====
+torch.Size([1, 1, 3])
+tensor([[0.1000]])
+inh inf:tensor([[1.3000]])
+exc inf:tensor([[-0.7000]])
+gj inf inf:tensor([[-0.7000]])
+current influence (sum Ij): tensor([[-2.7000]])
+Stimulus (instate + Ij) tensor([[-10.]])
+tensor([[0.]])
+Output state (O): 0.0
+Internal state (O): -10.100000381469727
+==== Time step 9 ====
+torch.Size([1, 1, 3])
+tensor([[0.1000]])
+inh inf:tensor([[1.4000]])
+exc inf:tensor([[-0.8000]])
+gj inf inf:tensor([[-0.8000]])
+current influence (sum Ij): tensor([[-3.]])
+Stimulus (instate + Ij) tensor([[-10.]])
+tensor([[0.]])
+Output state (O): 0.0
+Internal state (O): -10.0
+==== Time step 10 ====
+torch.Size([1, 1, 3])
+tensor([[0.1000]])
+inh inf:tensor([[0.6000]])
+exc inf:tensor([[1.]])
+gj inf inf:tensor([[-0.4000]])
+current influence (sum Ij): tensor([[-2.9802e-08]])
+Stimulus (instate + Ij) tensor([[-10.]])
+tensor([[0.]])
+Output state (O): 0.0
+Internal state (O): -10.100000381469727
+==== Time step 11 ====
+torch.Size([1, 1, 3])
+tensor([[0.1000]])
+inh inf:tensor([[0.6500]])
+exc inf:tensor([[0.9500]])
+gj inf inf:tensor([[-0.4500]])
+current influence (sum Ij): tensor([[-0.1500]])
+Stimulus (instate + Ij) tensor([[-10.]])
+tensor([[0.]])
+Output state (O): 0.0
+Internal state (O): -10.0
+==== Time step 12 ====
+torch.Size([1, 1, 3])
+tensor([[0.1000]])
+inh inf:tensor([[0.7000]])
+exc inf:tensor([[0.9000]])
+gj inf inf:tensor([[-0.5000]])
+current influence (sum Ij): tensor([[-0.3000]])
+Stimulus (instate + Ij) tensor([[-10.]])
+tensor([[0.]])
+Output state (O): 0.0
+Internal state (O): -10.100000381469727
+==== Time step 13 ====
+torch.Size([1, 1, 3])
+tensor([[0.1000]])
+inh inf:tensor([[0.7500]])
+exc inf:tensor([[0.8500]])
+gj inf inf:tensor([[-0.5500]])
+current influence (sum Ij): tensor([[-0.4500]])
+Stimulus (instate + Ij) tensor([[-10.]])
+tensor([[0.]])
+Output state (O): 0.0
+Internal state (O): -10.0
+==== Time step 14 ====
+torch.Size([1, 1, 3])
+tensor([[0.1000]])
+inh inf:tensor([[0.8000]])
+exc inf:tensor([[0.8000]])
+gj inf inf:tensor([[-0.6000]])
+current influence (sum Ij): tensor([[-0.6000]])
+Stimulus (instate + Ij) tensor([[-10.]])
+tensor([[0.]])
+Output state (O): 0.0
+Internal state (O): -10.100000381469727
+==== Time step 15 ====
+torch.Size([1, 1, 3])
+tensor([[0.1000]])
+inh inf:tensor([[0.8500]])
+exc inf:tensor([[0.7500]])
+gj inf inf:tensor([[-0.6500]])
+current influence (sum Ij): tensor([[-0.7500]])
+Stimulus (instate + Ij) tensor([[-10.]])
+tensor([[0.]])
+Output state (O): 0.0
+Internal state (O): -10.0
+==== Time step 16 ====
+torch.Size([1, 1, 3])
+tensor([[0.1000]])
+inh inf:tensor([[0.9000]])
+exc inf:tensor([[0.7000]])
+gj inf inf:tensor([[-0.7000]])
+current influence (sum Ij): tensor([[-0.9000]])
+Stimulus (instate + Ij) tensor([[-10.]])
+tensor([[0.]])
+Output state (O): 0.0
+Internal state (O): -10.100000381469727
+==== Time step 17 ====
+torch.Size([1, 1, 3])
+tensor([[0.1000]])
+inh inf:tensor([[0.9500]])
+exc inf:tensor([[0.6500]])
+gj inf inf:tensor([[-0.7500]])
+current influence (sum Ij): tensor([[-1.0500]])
+Stimulus (instate + Ij) tensor([[-10.]])
+tensor([[0.]])
+Output state (O): 0.0
+Internal state (O): -10.0
+==== Time step 18 ====
+torch.Size([1, 1, 3])
+tensor([[0.1000]])
+inh inf:tensor([[1.]])
+exc inf:tensor([[0.6000]])
+gj inf inf:tensor([[-0.8000]])
+current influence (sum Ij): tensor([[-1.2000]])
+Stimulus (instate + Ij) tensor([[-10.]])
+tensor([[0.]])
+Output state (O): 0.0
+Internal state (O): -10.100000381469727
+==== Time step 19 ====
+torch.Size([1, 1, 3])
+tensor([[0.1000]])
+inh inf:tensor([[1.0500]])
+exc inf:tensor([[0.5500]])
+gj inf inf:tensor([[-0.8500]])
+current influence (sum Ij): tensor([[-1.3500]])
+Stimulus (instate + Ij) tensor([[-10.]])
+tensor([[0.]])
+Output state (O): 0.0
+Internal state (O): -10.0
+==== Time step 20 ====
+torch.Size([1, 1, 3])
+tensor([[0.1000]])
+inh inf:tensor([[0.1000]])
+exc inf:tensor([[0.1000]])
+gj inf inf:tensor([[1.5000]])
+current influence (sum Ij): tensor([[1.5000]])
+Stimulus (instate + Ij) tensor([[-8.5000]])
+tensor([[0.]])
+Output state (O): 0.0
+Internal state (O): -8.5
+==== Time step 21 ====
+torch.Size([1, 1, 3])
+tensor([[0.1000]])
+inh inf:tensor([[0.1000]])
+exc inf:tensor([[0.1000]])
+gj inf inf:tensor([[1.5000]])
+current influence (sum Ij): tensor([[1.5000]])
+Stimulus (instate + Ij) tensor([[-7.]])
+tensor([[0.]])
+Output state (O): 0.0
+Internal state (O): -7.0
+==== Time step 22 ====
+torch.Size([1, 1, 3])
+tensor([[0.1000]])
+inh inf:tensor([[0.1000]])
+exc inf:tensor([[0.1000]])
+gj inf inf:tensor([[1.5000]])
+current influence (sum Ij): tensor([[1.5000]])
+Stimulus (instate + Ij) tensor([[-5.5000]])
+tensor([[0.]])
+Output state (O): 0.0
+Internal state (O): -5.5
+==== Time step 23 ====
+torch.Size([1, 1, 3])
+tensor([[0.1000]])
+inh inf:tensor([[0.1000]])
+exc inf:tensor([[0.1000]])
+gj inf inf:tensor([[1.5000]])
+current influence (sum Ij): tensor([[1.5000]])
+Stimulus (instate + Ij) tensor([[-4.]])
+tensor([[0.]])
+Output state (O): 0.0
+Internal state (O): -4.0
+==== Time step 24 ====
+torch.Size([1, 1, 3])
+tensor([[0.1000]])
+inh inf:tensor([[0.1000]])
+exc inf:tensor([[0.1000]])
+gj inf inf:tensor([[1.5000]])
+current influence (sum Ij): tensor([[1.5000]])
+Stimulus (instate + Ij) tensor([[-2.5000]])
+tensor([[0.]])
+Output state (O): 0.0
+Internal state (O): -2.5
+==== Time step 25 ====
+torch.Size([1, 1, 3])
+tensor([[0.1000]])
+inh inf:tensor([[0.1000]])
+exc inf:tensor([[0.1000]])
+gj inf inf:tensor([[1.5000]])
+current influence (sum Ij): tensor([[1.5000]])
+Stimulus (instate + Ij) tensor([[-1.]])
+tensor([[0.]])
+Output state (O): 0.0
+Internal state (O): -1.0
+==== Time step 26 ====
+torch.Size([1, 1, 3])
+tensor([[0.1000]])
+inh inf:tensor([[0.1000]])
+exc inf:tensor([[0.1000]])
+gj inf inf:tensor([[1.5000]])
+current influence (sum Ij): tensor([[1.5000]])
+Stimulus (instate + Ij) tensor([[0.5000]])
+tensor([[0.]])
+Output state (O): 0.0
+Internal state (O): 0.5
+==== Time step 27 ====
+torch.Size([1, 1, 3])
+tensor([[0.1000]])
+inh inf:tensor([[0.1000]])
+exc inf:tensor([[0.1000]])
+gj inf inf:tensor([[1.5000]])
+current influence (sum Ij): tensor([[1.5000]])
+Stimulus (instate + Ij) tensor([[2.]])
+tensor([[1.]])
+Output state (O): 1.0
+Internal state (O): 1.0
+==== Time step 28 ====
+torch.Size([1, 1, 3])
+tensor([[0.1000]])
+inh inf:tensor([[0.1000]])
+exc inf:tensor([[0.1000]])
+gj inf inf:tensor([[1.5000]])
+current influence (sum Ij): tensor([[1.5000]])
+Stimulus (instate + Ij) tensor([[2.5000]])
+tensor([[1.5000]])
+Output state (O): 1.5
+Internal state (O): 1.5
+==== Time step 29 ====
+torch.Size([1, 1, 3])
+tensor([[0.1000]])
+inh inf:tensor([[0.1000]])
+exc inf:tensor([[0.1000]])
+gj inf inf:tensor([[0.]])
+current influence (sum Ij): tensor([[0.]])
+Stimulus (instate + Ij) tensor([[1.5000]])
+tensor([[0.5000]])
+Output state (O): 0.5
+Internal state (O): 0.5
+==== Time step 30 ====
+torch.Size([1, 1, 3])
+tensor([[0.1000]])
+inh inf:tensor([[3.1000]])
+exc inf:tensor([[3.1000]])
+gj inf inf:tensor([[3.1000]])
+current influence (sum Ij): tensor([[3.1000]])
+Stimulus (instate + Ij) tensor([[3.6000]])
+tensor([[2.6000]])
+Output state (O): 2.5999999046325684
+Internal state (O): 2.5999999046325684
+==== Time step 31 ====
+torch.Size([1, 1, 3])
+tensor([[0.1000]])
+inh inf:tensor([[3.2000]])
+exc inf:tensor([[3.2000]])
+gj inf inf:tensor([[3.2000]])
+current influence (sum Ij): tensor([[3.2000]])
+Stimulus (instate + Ij) tensor([[5.8000]])
+tensor([[4.8000]])
+Output state (O): 4.800000190734863
+Internal state (O): 4.800000190734863
+==== Time step 32 ====
+torch.Size([1, 1, 3])
+tensor([[0.1000]])
+inh inf:tensor([[3.3000]])
+exc inf:tensor([[3.3000]])
+gj inf inf:tensor([[-3.3000]])
+current influence (sum Ij): tensor([[-3.3000]])
+Stimulus (instate + Ij) tensor([[1.5000]])
+tensor([[0.5000]])
+Output state (O): 0.5000002384185791
+Internal state (O): 0.5000002384185791
+==== Time step 33 ====
+torch.Size([1, 1, 3])
+tensor([[0.1000]])
+inh inf:tensor([[3.4000]])
+exc inf:tensor([[3.4000]])
+gj inf inf:tensor([[3.4000]])
+current influence (sum Ij): tensor([[3.4000]])
+Stimulus (instate + Ij) tensor([[3.9000]])
+tensor([[2.9000]])
+Output state (O): 2.9000003337860107
+Internal state (O): 2.9000003337860107
+==== Time step 34 ====
+torch.Size([1, 1, 3])
+tensor([[0.1000]])
+inh inf:tensor([[3.5000]])
+exc inf:tensor([[3.5000]])
+gj inf inf:tensor([[3.5000]])
+current influence (sum Ij): tensor([[3.5000]])
+Stimulus (instate + Ij) tensor([[6.4000]])
+tensor([[5.4000]])
+Output state (O): 5.40000057220459
+Internal state (O): 5.40000057220459
+==== Time step 35 ====
+torch.Size([1, 1, 3])
+tensor([[0.1000]])
+inh inf:tensor([[3.6000]])
+exc inf:tensor([[3.6000]])
+gj inf inf:tensor([[-3.6000]])
+current influence (sum Ij): tensor([[-3.6000]])
+Stimulus (instate + Ij) tensor([[1.8000]])
+tensor([[0.8000]])
+Output state (O): 0.8000006675720215
+Internal state (O): 0.8000006675720215
+==== Time step 36 ====
+torch.Size([1, 1, 3])
+tensor([[0.1000]])
+inh inf:tensor([[3.7000]])
+exc inf:tensor([[3.7000]])
+gj inf inf:tensor([[3.7000]])
+current influence (sum Ij): tensor([[3.7000]])
+Stimulus (instate + Ij) tensor([[4.5000]])
+tensor([[3.5000]])
+Output state (O): 3.5000009536743164
+Internal state (O): 3.5000009536743164
+==== Time step 37 ====
+torch.Size([1, 1, 3])
+tensor([[0.1000]])
+inh inf:tensor([[3.8000]])
+exc inf:tensor([[3.8000]])
+gj inf inf:tensor([[3.8000]])
+current influence (sum Ij): tensor([[3.8000]])
+Stimulus (instate + Ij) tensor([[7.3000]])
+tensor([[6.3000]])
+Output state (O): 6.30000114440918
+Internal state (O): 6.30000114440918
+==== Time step 38 ====
+torch.Size([1, 1, 3])
+tensor([[0.1000]])
+inh inf:tensor([[3.9000]])
+exc inf:tensor([[3.9000]])
+gj inf inf:tensor([[-3.9000]])
+current influence (sum Ij): tensor([[-3.9000]])
+Stimulus (instate + Ij) tensor([[2.4000]])
+tensor([[1.4000]])
+Output state (O): 1.400001049041748
+Internal state (O): 1.400001049041748
+==== Time step 39 ====
+torch.Size([1, 1, 3])
+tensor([[0.1000]])
+inh inf:tensor([[4.]])
+exc inf:tensor([[4.]])
+gj inf inf:tensor([[4.]])
+current influence (sum Ij): tensor([[4.]])
+Stimulus (instate + Ij) tensor([[5.4000]])
+tensor([[4.4000]])
+Output state (O): 4.400001049041748
+Internal state (O): 4.400001049041748
+==== Time step 40 ====
+torch.Size([1, 1, 3])
+tensor([[0.1000]])
+inh inf:tensor([[4.1000]])
+exc inf:tensor([[4.1000]])
+gj inf inf:tensor([[-4.1000]])
+current influence (sum Ij): tensor([[-4.1000]])
+Stimulus (instate + Ij) tensor([[0.3000]])
+tensor([[0.]])
+Output state (O): 0.0
+Internal state (O): 0.3000011444091797
+==== Time step 41 ====
+torch.Size([1, 1, 3])
+tensor([[0.1000]])
+inh inf:tensor([[4.2000]])
+exc inf:tensor([[4.2000]])
+gj inf inf:tensor([[4.2000]])
+current influence (sum Ij): tensor([[4.2000]])
+Stimulus (instate + Ij) tensor([[4.5000]])
+tensor([[3.5000]])
+Output state (O): 3.5000009536743164
+Internal state (O): 3.5000009536743164
+==== Time step 42 ====
+torch.Size([1, 1, 3])
+tensor([[0.1000]])
+inh inf:tensor([[4.3000]])
+exc inf:tensor([[4.3000]])
+gj inf inf:tensor([[4.3000]])
+current influence (sum Ij): tensor([[4.3000]])
+Stimulus (instate + Ij) tensor([[7.8000]])
+tensor([[6.8000]])
+Output state (O): 6.80000114440918
+Internal state (O): 6.80000114440918
+==== Time step 43 ====
+torch.Size([1, 1, 3])
+tensor([[0.1000]])
+inh inf:tensor([[4.4000]])
+exc inf:tensor([[4.4000]])
+gj inf inf:tensor([[-4.4000]])
+current influence (sum Ij): tensor([[-4.4000]])
+Stimulus (instate + Ij) tensor([[2.4000]])
+tensor([[1.4000]])
+Output state (O): 1.400001049041748
+Internal state (O): 1.400001049041748
+==== Time step 44 ====
+torch.Size([1, 1, 3])
+tensor([[0.1000]])
+inh inf:tensor([[4.5000]])
+exc inf:tensor([[4.5000]])
+gj inf inf:tensor([[4.5000]])
+current influence (sum Ij): tensor([[4.5000]])
+Stimulus (instate + Ij) tensor([[5.9000]])
+tensor([[4.9000]])
+Output state (O): 4.900001049041748
+Internal state (O): 4.900001049041748
+==== Time step 45 ====
+torch.Size([1, 1, 3])
+tensor([[0.1000]])
+inh inf:tensor([[4.6000]])
+exc inf:tensor([[4.6000]])
+gj inf inf:tensor([[-4.6000]])
+current influence (sum Ij): tensor([[-4.6000]])
+Stimulus (instate + Ij) tensor([[0.3000]])
+tensor([[0.]])
+Output state (O): 0.0
+Internal state (O): 0.3000011444091797
+==== Time step 46 ====
+torch.Size([1, 1, 3])
+tensor([[0.1000]])
+inh inf:tensor([[4.7000]])
+exc inf:tensor([[4.7000]])
+gj inf inf:tensor([[4.7000]])
+current influence (sum Ij): tensor([[4.7000]])
+Stimulus (instate + Ij) tensor([[5.0000]])
+tensor([[4.0000]])
+Output state (O): 4.000000953674316
+Internal state (O): 4.000000953674316
+==== Time step 47 ====
+torch.Size([1, 1, 3])
+tensor([[0.1000]])
+inh inf:tensor([[4.8000]])
+exc inf:tensor([[4.8000]])
+gj inf inf:tensor([[4.8000]])
+current influence (sum Ij): tensor([[4.8000]])
+Stimulus (instate + Ij) tensor([[8.8000]])
+tensor([[7.8000]])
+Output state (O): 7.80000114440918
+Internal state (O): 7.80000114440918
+==== Time step 48 ====
+torch.Size([1, 1, 3])
+tensor([[0.1000]])
+inh inf:tensor([[4.9000]])
+exc inf:tensor([[4.9000]])
+gj inf inf:tensor([[-4.9000]])
+current influence (sum Ij): tensor([[-4.9000]])
+Stimulus (instate + Ij) tensor([[2.9000]])
+tensor([[1.9000]])
+Output state (O): 1.900001049041748
+Internal state (O): 1.900001049041748
+==== Time step 49 ====
+torch.Size([1, 1, 3])
+tensor([[0.1000]])
+inh inf:tensor([[5.]])
+exc inf:tensor([[5.]])
+gj inf inf:tensor([[5.]])
+current influence (sum Ij): tensor([[5.]])
+Stimulus (instate + Ij) tensor([[6.9000]])
+tensor([[5.9000]])
+Output state (O): 5.900001049041748
+Internal state (O): 5.900001049041748
