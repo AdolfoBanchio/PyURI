@@ -18,14 +18,9 @@ import torch
 from typing import Optional, Iterable, Union
 from FIURI_node import FIURI_node
 import matplotlib.pyplot as plt
-from bindsnet.network.nodes import Input, LIFNodes
-from bindsnet.network.topology import Connection
-from bindsnet.network.topology_features import Weight, Bias
+
 
 time_steps = 50
-
-# one neuron as source, 3 channels because has 3 junctions with target 
-source_layer = Input(shape=(1,3)) 
 
 # Create FIURI node
 fiuri = FIURI_node(
@@ -40,13 +35,7 @@ fiuri = FIURI_node(
     clamp_max=10.0,
     sum_input=True
 )
-# Identity connection: input channel k -> Fiuri channel k
-# Shapes are flattened for weights
-W = torch.eye(3) # 3x3 identity
-connection = Connection(
-        source=source_layer,
-        target=fiuri,
-)
+
 
 # Record states
 in_states = torch.zeros(time_steps, dtype=torch.float32)
