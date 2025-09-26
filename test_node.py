@@ -50,21 +50,21 @@ for t in range(time_steps):
     print(f"==== Time step {t} ====")
 
     if t<10:
-        inh_current=0.5 + t*0.1
-        exc_current=0.1 - t*0.1
-        gj_current=0.1 - t*0.1
+        inh_current=0.5 
+        exc_current=0.0
+        gj_current=0.0
     elif t<20:
-        inh_current=0.1 + t*0.05
-        exc_current=1.5 - t*0.05
-        gj_current=0.1 - t*0.05
+        inh_current=0.0
+        exc_current=1.5 
+        gj_current=0.0
     elif t<30:
-        inh_current=0.1 
-        exc_current=0.1
+        inh_current=0.0
+        exc_current=0.0
         gj_current=1.5
     else:
-        inh_current=0.1 + t*0.1
-        exc_current=0.1 + t*0.1
-        gj_current=0.1 + t*0.1
+        inh_current=0.0
+        exc_current=0.0
+        gj_current=0.0
 
     # create tensor with dimentions (batch, n, 3)
     # here, batch: one sample, n=1 one neuron
@@ -86,7 +86,7 @@ for t in range(time_steps):
 # Plot results:
 # plot 1: internal state and out state vs time steps
 # plot 2: input currents vs time steps
-fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(10, 8))
+fig, ax1 = plt.subplots(1, figsize=(10, 8))
 ax1.plot(in_states.numpy(), label='Internal State (E)', color='blue')
 ax1.plot(out_states.numpy(), label='Output State (S)', color='orange')
 ax1.axhline(y=fiuri.threshold.item(), color='red', linestyle='--', label='Threshold (T)')
@@ -96,13 +96,5 @@ ax1.set_ylabel('State Value')
 ax1.legend()
 ax1.grid()
 
-ax2.plot(influence_trace.numpy())
-ax2.set_title('Input Currents')
-ax2.set_xlabel('Time Steps')
-ax2.set_ylabel('Current Value')
-ax2.legend(['Stimulus (S)'])
-ax2.grid()
-
-plt.tight_layout()
 plt.show()
 plt.savefig('scripts_outs/pyuri_dynamics.png')

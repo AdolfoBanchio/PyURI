@@ -23,6 +23,7 @@ from bindsnet.network.topology import Connection
 from bindsnet.network.topology_features import Weight, Bias
 from bindsnet.network import Network
 from bindsnet.network.monitors import Monitor
+from bindsnet.analysis.plotting import plot_spikes, plot_voltages
 
 # one neuron as source, 3 channels because has 3 junctions with target 
 source_layer = Input(shape=(1,3)) 
@@ -99,3 +100,20 @@ influence_trace = torch.zeros(time_steps, dtype=torch.float32)
 # Run simulation
 print("Running simulation...")
 net.run(inputs={"in": X}, time=time_steps)  # input_time_dim defaults to 0
+
+in_state = in_state_monitor.get("in_state")
+out_state = out_state_monitor.get("out_state")
+
+
+fig = plt.figure(figsize=(10,8))
+plt.plot(in_state.view(-1), label='Internal State (E)', color='blue')
+plt.plot(out_state.view(-1), label='Output State (S)', color='orange')
+plt.axhline(y=fiuri.threshold.item(), color='red', linestyle='--', label='Threshold (T)')
+plt.title('PyURI Neuron Dynamics')
+plt.xlabel('Time Steps')
+plt.ylabel('State Value')
+plt.legend()
+plt.grid()
+
+plt.show()
+plt.savefig("scripts_outs/pyuri_dinamics_integration.png")
