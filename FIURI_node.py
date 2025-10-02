@@ -33,6 +33,7 @@ class FIURI_node(Nodes):
     """
     def __init__(
         self,
+        debug: Optional[bool] = False,
         num_cells: Optional[int] = None,
         traces: bool = False,
         traces_additive: bool = False,
@@ -71,7 +72,7 @@ class FIURI_node(Nodes):
             sum_input=sum_input,
             **kwargs,
         )
-
+        self.debug = debug
         # save num of cells
         self.num_cells = num_cells
         # --- learnable per-neuron parameters (shape: (n,))
@@ -116,7 +117,7 @@ class FIURI_node(Nodes):
                     - batch: numbers of samples procesed in parallel.
         """
         batch = x.shape[0]
-        print(x.shape)
+        print(x)
         # Keep base behavior (traces), sum_input always False, because we are using 3 channels
         super().forward(x)
         
@@ -129,8 +130,7 @@ class FIURI_node(Nodes):
         
         assert T.shape[1] == self.num_cells and d.shape[1] == self.num_cells
 
-        print(d)
-        
+        print(f'summed {self.summed}')
         exc = self.summed[..., 0] # (batch, n)
         inh = self.summed[..., 1] # (batch, n)
         gj  = self.summed[..., 2] # (batch, n)
@@ -140,8 +140,6 @@ class FIURI_node(Nodes):
 
         # chemical influcene +exc - inh 
         # (assumes the input arrives with all the corresponing inputs summed and weighted)
-        print(f'inh inf:{inh}')
-        print(f'exc inf:{exc}')
         chem_influence = +exc - inh
 
         # TODO: verify if equality must be checked ASK!
@@ -153,10 +151,8 @@ class FIURI_node(Nodes):
         #gj_sign = torch.where(gj >= self.in_state, 1.0, -1.0)
         
         gj_curr = gj_sign * gj
-        print(f'gj inf inf:{gj_curr}')
 
         input_current = chem_influence + gj_curr 
-        print('current influence (sum Ij):', input_current)
 
         # Compute the stimulus coming trhough the neuron
         # --- S_n = E_n + sum(I_jn)
@@ -165,8 +161,12 @@ class FIURI_node(Nodes):
         # clamp (keeps numerics in check; remove if not desired)
         S = torch.clamp(S, min=self.clamp_min, max=self.clamp_max)
 
-        
-        print('Stimulus (instate + Ij)', S)
+        if self.debug:
+            print(f'inh inf:{inh}')
+            print(f'exc inf:{exc}')
+            print(f'gj inf inf:{gj_curr}')
+            print('current influence (sum Ij):', input_current)
+            print('Stimulus (instate + Ij)', S)
         # Conditions
         gt_thresh = S > T
         # Avoid exact float equality; use tolerance if you truly need equality.
@@ -197,6 +197,10 @@ class FIURI_node(Nodes):
         self.out_state = new_O
         self.in_state  = new_E
 
+        if self.debug:
+            print(f'Final out_state: {self.out_state}')
+            print(f'Final in_state: {self.in_state}')
+            print('==== End of update ====')
         # If we used the pre-sum buffer, zero it for next step
         if self.sum_input and (self.summed is not None):
             self.summed.zero_()
@@ -205,6 +209,8 @@ class FIURI_node(Nodes):
 
     def reset_state_variables(self) -> None:
         # Reset neuron states at episode boundaries
+        # TODO: see what actually needs to be reset, 
+        # because in and out state are important for future forward computations
         if self.in_state is not None:
             self.in_state.zero_()
         if self.s is not None:
@@ -214,7 +220,4 @@ class FIURI_node(Nodes):
         
         # Keep traces reset from parent if enabled
         super().reset_state_variables()
-        # If using summed input, zero it too
-        if self.sum_input and (self.summed is not None):
-            self.summed.zero_()
         

@@ -14,6 +14,10 @@
     weights fixed to 1.0 for simplicity.
     Plot the internal and output sates of the neuron.
 """
+import sys
+import os
+sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
+
 import torch
 from typing import Optional, Iterable, Union
 from FIURI_node import FIURI_node
@@ -40,7 +44,8 @@ fiuri = FIURI_node(
     learn_decay=False,
     clamp_min=-10.0,
     clamp_max=10.0,
-    sum_input=True
+    sum_input=True,
+    debug=True
 )
 # Identity connection: input channel k -> Fiuri channel k
 # Shapes are flattened for weights
@@ -92,6 +97,7 @@ X[0:10, 0, 0, :] = torch.tensor([0.0, 0.5, 0.0])   # [exc, inh, gj]
 X[10:20,0, 0, :] = torch.tensor([1.5, 0.0, 0.0])
 X[20:30,0, 0, :] = torch.tensor([0.0, 0.0, 1.5])
 
+print(X)
 # Record states
 in_states = torch.zeros(time_steps, dtype=torch.float32)
 out_states = torch.zeros(time_steps, dtype=torch.float32)
@@ -99,13 +105,13 @@ influence_trace = torch.zeros(time_steps, dtype=torch.float32)
 
 # Run simulation
 print("Running simulation...")
-net.run(inputs={"in": X}, time=time_steps)  # input_time_dim defaults to 0
+net.run(inputs={"in": X}, time=time_steps, one_step=True)  # input_time_dim defaults to 0
 
 in_state = in_state_monitor.get("in_state")
 out_state = out_state_monitor.get("out_state")
 
 
-fig = plt.figure(figsize=(10,8))
+fig = plt.figure(figsize=(15,6))
 plt.plot(in_state.view(-1), label='Internal State (E)', color='blue')
 plt.plot(out_state.view(-1), label='Output State (S)', color='orange')
 plt.axhline(y=fiuri.threshold.item(), color='red', linestyle='--', label='Threshold (T)')
@@ -116,4 +122,6 @@ plt.legend()
 plt.grid()
 
 plt.show()
-plt.savefig("scripts_outs/pyuri_dinamics_integration.png")
+
+save_path = os.path.join(os.path.dirname(__file__), "out/pyuri_dynamics_integration.png")
+plt.savefig(save_path)

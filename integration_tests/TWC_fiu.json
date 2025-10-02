@@ -1,0 +1,53 @@
+{
+  "neurons": {
+    "PVD": 0, "PLM": 1, "AVM": 2, "ALM": 3,
+    "DVA": 4, "AVD": 5, "PVC": 6, "AVA": 7, "AVB": 8,
+    "REV": 9, "FWD": 10
+  },
+
+  "groups": {
+    "input":  ["PVD", "PLM", "AVM", "ALM"],
+    "hidden": ["DVA", "AVD", "PVC", "AVA", "AVB"],
+    "output": ["REV", "FWD"]
+  },
+
+  "channels": { "EX": 0, "IN": 1, "GJ": 2 },
+
+  "edges": [
+    { "src": "PVD", "dst": "DVA", "type": "IN" },
+    { "src": "PVD", "dst": "PVC", "type": "IN" },
+    { "src": "PVD", "dst": "AVA", "type": "IN" },
+
+    { "src": "PLM", "dst": "DVA", "type": "IN" },
+    { "src": "PLM", "dst": "AVD", "type": "IN" },
+    { "src": "PLM", "dst": "AVA", "type": "IN" },
+    { "src": "PLM", "dst": "PVC", "type": "GJ" },
+
+    { "src": "AVM", "dst": "PVC", "type": "IN" },
+    { "src": "AVM", "dst": "AVD", "type": "GJ" },
+
+    { "src": "ALM", "dst": "PVC", "type": "IN" },
+    { "src": "ALM", "dst": "AVD", "type": "IN" },
+
+    { "src": "DVA", "dst": "PVC", "type": "EX" },
+
+    { "src": "AVD", "dst": "AVA", "type": "EX" },
+    { "src": "AVD", "dst": "AVB", "type": "EX" },
+    { "src": "AVD", "dst": "PVC", "type": "EX" },
+
+    { "src": "PVC", "dst": "AVB", "type": "EX" },
+    { "src": "PVC", "dst": "AVD", "type": "EX" },
+    { "src": "PVC", "dst": "DVA", "type": "EX" },
+    { "src": "PVC", "dst": "AVA", "type": "EX" },
+
+    { "src": "AVA", "dst": "AVB", "type": "IN" },
+    { "src": "AVA", "dst": "PVC", "type": "IN" },
+    { "src": "AVA", "dst": "REV", "type": "EX" },
+    { "src": "AVA", "dst": "AVD", "type": "IN" },
+
+    { "src": "AVB", "dst": "FWD", "type": "EX" },
+    { "src": "AVB", "dst": "AVA", "type": "IN" },
+    { "src": "AVB", "dst": "AVD", "type": "IN" }
+  ]
+}
+

@@ -14,6 +14,10 @@
     weights fixed to 1.0 for simplicity.
     Plot the internal and output sates of the neuron.
 """
+import sys
+import os
+sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
+
 import torch
 from typing import Optional, Iterable, Union
 from FIURI_node import FIURI_node
@@ -74,11 +78,8 @@ for t in range(time_steps):
     stimulus = fiuri.forward(currents)
     influence_trace[t] = stimulus.item()
 
-    print(fiuri.out_state)
     output_state = fiuri.out_state.item()
     internal_state = fiuri.in_state.item()
-    print('Output state (O):', output_state)
-    print('Internal state (O):', internal_state)
     # Record states
     in_states[t] = internal_state
     out_states[t] = output_state
@@ -86,7 +87,7 @@ for t in range(time_steps):
 # Plot results:
 # plot 1: internal state and out state vs time steps
 # plot 2: input currents vs time steps
-fig, ax1 = plt.subplots(1, figsize=(10, 8))
+fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(10, 8))
 ax1.plot(in_states.numpy(), label='Internal State (E)', color='blue')
 ax1.plot(out_states.numpy(), label='Output State (S)', color='orange')
 ax1.axhline(y=fiuri.threshold.item(), color='red', linestyle='--', label='Threshold (T)')
@@ -96,5 +97,15 @@ ax1.set_ylabel('State Value')
 ax1.legend()
 ax1.grid()
 
+ax2.plot(influence_trace.numpy())
+ax2.set_title('Input Currents')
+ax2.set_xlabel('Time Steps')
+ax2.set_ylabel('Current Value')
+ax2.legend(['Stimulus (S)'])
+ax2.grid()
+
+plt.tight_layout()
 plt.show()
-plt.savefig('scripts_outs/pyuri_dynamics.png')
+save_path = os.path.join(os.path.dirname(__file__), "out/pyuri_dynamics.png")
+
+plt.savefig(save_path)
