@@ -126,6 +126,9 @@ net.add_connection(
     source="hid", target="out"
 )
 
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+net.to(device)
+
 print(summary(net=net))
 
 print("\nNetwork Parameters:\n")
@@ -138,5 +141,3 @@ for name, param in net.named_parameters():
     print(f"  Data (first 5 elements): {param.flatten()[:5].tolist()}")
     print("-" * 40)
 
-
-net.run
