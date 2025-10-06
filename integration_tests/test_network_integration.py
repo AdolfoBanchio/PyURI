@@ -140,4 +140,3 @@ for name, param in net.named_parameters():
     print(f"  Requires grad: {param.requires_grad}")
     print(f"  Data (first 5 elements): {param.flatten()[:5].tolist()}")
     print("-" * 40)
- 
