@@ -1,7 +1,9 @@
 import torch
+import numpy as np
 from torch import nn
-from typing import Optional, Iterable, Union
-from bindsnet.network.nodes import Nodes
+from typing import Optional, Sequence, Tuple, Union
+from bindsnet.network.nodes import Nodes, CSRMNodes
+from bindsnet.network.topology import AbstractConnection
 
 class FIURI_node(Nodes):
     """  
@@ -85,7 +87,7 @@ class FIURI_node(Nodes):
         # --- persistent state buffers (allocated lazily with correct batch/device/dtype)
         self.register_buffer("in_state", torch.tensor(initial_in_state, dtype=torch.float))  # E (batch, n)
         self.register_buffer("out_state", torch.tensor(initial_out_state, dtype=torch.float))  # O/output (batch, n) — BindsNET convention
-
+        self.s = torch.tensor(torch.tensor(initial_out_state, dtype=torch.float))
         # defaults for initial states (scalars stored just to use at first allocation)
         self._init_E = float(initial_in_state)
         self._init_O = float(initial_out_state)
@@ -117,7 +119,6 @@ class FIURI_node(Nodes):
                     - batch: numbers of samples procesed in parallel.
         """
         batch = x.shape[0]
-        print(x)
         # Keep base behavior (traces), sum_input always False, because we are using 3 channels
         super().forward(x)
         
@@ -130,7 +131,6 @@ class FIURI_node(Nodes):
         
         assert T.shape[1] == self.num_cells and d.shape[1] == self.num_cells
 
-        print(f'summed {self.summed}')
         exc = self.summed[..., 0] # (batch, n)
         inh = self.summed[..., 1] # (batch, n)
         gj  = self.summed[..., 2] # (batch, n)
@@ -205,19 +205,150 @@ class FIURI_node(Nodes):
         if self.sum_input and (self.summed is not None):
             self.summed.zero_()
         
-        return S
+        # Expose activity with 3 channels for downstream connections:
+        # channel 0 carries the neuron's output; channels 1-2 are zero.
+        # Shape: (batch, num_cells, 3) matching layer.shape for flattening.
+        zeros = torch.zeros_like(self.out_state)
+        self.s = torch.stack([self.out_state, zeros, zeros], dim=-1)
+        return self.out_state
 
     def reset_state_variables(self) -> None:
-        # Reset neuron states at episode boundaries
-        # TODO: see what actually needs to be reset, 
-        # because in and out state are important for future forward computations
-        if self.in_state is not None:
-            self.in_state.zero_()
-        if self.s is not None:
-            self.s.zero_()
-        if self.out_state is not None:
-            self.out_state.zero_()
-        
-        # Keep traces reset from parent if enabled
+        """ 
+        Reset neuron states at episode boundaries
+        TODO: see what actually needs to be reset, because in 
+                and out state are important for future forward computations 
+        """
         super().reset_state_variables()
         
+
+class FIURI_Connection(AbstractConnection):
+    # language=rst
+    """
+    Specifies synapses between one or two populations of neurons.
+    """
+
+    def __init__(
+        self,
+        source: Nodes,
+        target: Nodes,
+        nu: Optional[Union[float, Sequence[float], Sequence[torch.Tensor]]] = None,
+        reduction: Optional[callable] = None,
+        weight_decay: float = 0.0,
+        **kwargs,
+    ) -> None:
+        # language=rst
+        """
+        Instantiates a :code:`Connection` object.
+
+        :param source: A layer of nodes from which the connection originates.
+        :param target: A layer of nodes to which the connection connects.
+         :param nu: Learning rate for both pre- and post-synaptic events. It also
+            accepts a pair of tensors to individualize learning rates of each neuron.
+            In this case, their shape should be the same size as the connection weights.
+        :param reduction: Method for reducing parameter updates along the minibatch
+            dimension.
+        :param weight_decay: Constant multiple to decay weights by on each iteration.
+
+        Keyword arguments:
+
+        :param LearningRule update_rule: Modifies connection parameters according to
+            some rule.
+        :param torch.Tensor w: Strengths of synapses.
+        :param torch.Tensor b: Target population bias.
+        :param Union[float, torch.Tensor] wmin: Minimum allowed value(s) on the connection weights. Single value, or
+            tensor of same size as w
+        :param Union[float, torch.Tensor] wmax: Minimum allowed value(s) on the connection weights. Single value, or
+            tensor of same size as w
+        :param float norm: Total weight per target neuron normalization constant.
+        """
+        super().__init__(source, target, nu, reduction, weight_decay, **kwargs)
+
+        w = kwargs.get("w", None)
+        if w is None:
+            if (self.wmin == -np.inf).any() or (self.wmax == np.inf).any():
+                w = torch.clamp(torch.rand(source.n, target.n), self.wmin, self.wmax)
+            else:
+                w = self.wmin + torch.rand(source.n, target.n) * (self.wmax - self.wmin)
+        else:
+            if (self.wmin != -np.inf).any() or (self.wmax != np.inf).any():
+                w = torch.clamp(torch.as_tensor(w), self.wmin, self.wmax)
+
+        self.w = nn.Parameter(w, requires_grad=True)
+
+        b = kwargs.get("b", None)
+        if b is not None:
+            self.b = nn.Parameter(b, requires_grad=True)
+        else:
+            self.b = None
+
+        if isinstance(self.target, CSRMNodes):
+            self.s_w = None
+
+    def compute(self, s: torch.Tensor) -> torch.Tensor:
+        # language=rst
+        """
+        Compute pre-activations given spikes using connection weights.
+
+        :param s: Incoming spikes.
+        :return: Incoming spikes multiplied by synaptic weights (with or without
+                 decaying spike activation).
+        """
+        # Compute multiplication of spike activations by weights and add bias.
+        if self.b is None:
+            post = s.view(s.size(0), -1).float() @ self.w
+        else:
+            post = s.view(s.size(0), -1).float() @ self.w + self.b
+        return post.view(s.size(0), *self.target.shape)
+
+    def compute_window(self, s: torch.Tensor) -> torch.Tensor:
+        # language=rst
+        """ """
+
+        if self.s_w == None:
+            # Construct a matrix of shape batch size * window size * dimension of layer
+            self.s_w = torch.zeros(
+                self.target.batch_size, self.target.res_window_size, *self.source.shape
+            )
+
+        # Add the spike vector into the first in first out matrix of windowed (res) spike trains
+        self.s_w = torch.cat((self.s_w[:, 1:, :], s[:, None, :]), 1)
+
+        # Compute multiplication of spike activations by weights and add bias.
+        if self.b is None:
+            post = (
+                self.s_w.view(self.s_w.size(0), self.s_w.size(1), -1).float() @ self.w
+            )
+        else:
+            post = (
+                self.s_w.view(self.s_w.size(0), self.s_w.size(1), -1).float() @ self.w
+                + self.b
+            )
+
+        return post.view(
+            self.s_w.size(0), self.target.res_window_size, *self.target.shape
+        )
+
+    def update(self, **kwargs) -> None:
+        # language=rst
+        """
+        Compute connection's update rule.
+        """
+        pass
+    
+    def normalize(self) -> None:
+        # language=rst
+        """
+        Normalize weights so each target neuron has sum of connection weights equal to
+        ``self.norm``.
+        """
+        if self.norm is not None:
+            w_abs_sum = self.w.abs().sum(0).unsqueeze(0)
+            w_abs_sum[w_abs_sum == 0] = 1.0
+            self.w *= self.norm / w_abs_sum
+
+    def reset_state_variables(self) -> None:
+        # language=rst
+        """
+        Contains resetting logic for the connection.
+        """
+        super().reset_state_variables()
