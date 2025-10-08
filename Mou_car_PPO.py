@@ -222,6 +222,7 @@ class TwcPPOAgent:
             "old_logp": buf.logp,
             "advantages": adv,
             "returns": ret,
+            "val": buf.val
         }
 
     def update(self, batch):
@@ -256,7 +257,7 @@ class TwcPPOAgent:
                 out_crit = self.critic.step(mb_obs)
                 v_pred = self.value_head(out_crit)
                 # clipped value loss like PPO2
-                v_clipped = (batch["val"][ids] if "val" in batch else v_pred.detach()) + (v_pred - (batch["val"][ids] if "val" in batch else v_pred.detach())).clamp(-self.vf_clip_coef, self.vf_clip_coef)
+                v_clipped = (batch["val"][ids].detach() if "val" in batch else v_pred.detach()) + (v_pred - (batch["val"][ids].detach() if "val" in batch else v_pred.detach())).clamp(-self.vf_clip_coef, self.vf_clip_coef)
                 v_loss = 0.5 * torch.max((v_pred - mb_ret)**2, (v_clipped - mb_ret)**2).mean()
 
                 # entropy bonus (use pre-squash Gaussian entropy as proxy)
@@ -281,6 +282,12 @@ class TwcPPOAgent:
             if np.mean(approx_kl_epoch) > 1.5 * self.target_kl:
                 print(f"Early stop: KL {np.mean(approx_kl_epoch):.4f} > {1.5*self.target_kl:.4f}")
                 break
+
+            for name, param in self.actor.net.named_parameters():
+                if param.grad is not None:
+                    print(f"Gradient for {name}: {param.grad}")
+                else:
+                    print(f"No gradient for {name}")
 
 
     def train(self):

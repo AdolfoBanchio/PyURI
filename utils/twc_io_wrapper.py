@@ -274,7 +274,7 @@ def mountaincar_pair_encoder(
         InterfacePair(obs_index=1, valleyVal=0.0,  minVal=-0.1, maxVal=0.1, positive_index=3, negative_index=0),
     ]
     return make_pairwise_in_encoder(pairs, 
-                                    set_inactive_to_min_state=set_inactive_to_min_state,
+                                    set_inactive_to_min_state=False,
                                     clamp_to_state_range=clamp_to_state_range)
 
 
