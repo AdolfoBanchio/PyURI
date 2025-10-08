@@ -194,8 +194,8 @@ class InterfacePair:
     maxVal: float
     positive_index: int
     negative_index: int
-    minState: float = -10.0
-    maxState: float = 10.0
+    minState: float = -1
+    maxState: float = 1.0
 
 
 def make_pairwise_in_encoder(
@@ -238,7 +238,7 @@ def make_pairwise_in_encoder(
 
                 if set_inactive_to_min_state:
                     x[mask_pos,0, p.negative_index] = p.minState
-                    x[mask_pos,1, p.negative_index] = p.minState
+                    x[mask_pos,1, p.negative_index] = p.minStateinput
 
             if mask_neg.any():
                 cor = v[mask_neg] / (-p.minVal)
@@ -271,7 +271,7 @@ def mountaincar_pair_encoder(
     """
     pairs = [
         InterfacePair(obs_index=0, valleyVal=-0.3, minVal=-1.2, maxVal=0.6, positive_index=1, negative_index=2),
-        InterfacePair(obs_index=1, valleyVal=0.0,  minVal=-0.1, maxVal=0.1, positive_index=3, negative_index=0),
+        InterfacePair(obs_index=1, valleyVal=0.0,  minVal=-0.07, maxVal=0.07, positive_index=3, negative_index=0),
     ]
     return make_pairwise_in_encoder(pairs, 
                                     set_inactive_to_min_state=False,

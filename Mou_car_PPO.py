@@ -181,11 +181,11 @@ class TwcPPOAgent:
         buf = Rollout(steps, obs_dim=self.obs_space.shape[0], device=self.device)
 
         obs, _ = self.env.reset()
-        self.actor.reset(); self.critic.reset()
 
         for t in range(steps):
             obs_t = torch.as_tensor(obs, dtype=torch.float32, device=self.device).unsqueeze(0)
 
+            self.actor.reset(); self.critic.reset()
             # actor forward
             with torch.no_grad():
                 out_act = self.actor.step(obs_t)             # (1,2)
@@ -241,8 +241,8 @@ class TwcPPOAgent:
                 mb_ret  = batch["returns"][ids]
 
                 # fresh states per minibatch
-                self.actor.detach()
-                self.critic.detach()
+                self.actor.reset()
+                self.critic.reset()
 
                 out_act = self.actor.step(mb_obs)                     # (B,2)
                 mean, log_std = policy_params_from_outstate(out_act)

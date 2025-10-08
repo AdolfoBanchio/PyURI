@@ -15,8 +15,8 @@ def create_layer(n_neurons) -> FIURIModule:
         num_cells=n_neurons,
         initial_in_state=0.0,
         initial_out_state=0.0,
-        initial_threshold=-1.0,
-        initial_decay=0.1,
+        initial_threshold=-2.0,
+        initial_decay=0.01,
         learn_threshold=True,
         learn_decay=True,
         clamp_min=-10.0,
@@ -42,8 +42,10 @@ def make_sparse_modules_from_tw_edges(edges_dict, device=None):
         # Overwrite initial random weights with our initialized vectors
         if ex["w"].numel():
             mod.ex_w.data.copy_(ex["w"].to(device))
+            mod.ex_w.data.mul_(2.0)
         if in_["w"].numel():
             mod.in_w.data.copy_(in_["w"].to(device))
+            mod.in_w.data.mul_(0.2)
         if gj["w"].numel():
             mod.gj_w.data.copy_(gj["w"].to(device))
         if device is not None:
