@@ -144,8 +144,14 @@ class FIURIModule(nn.Module):
         T = self.threshold.view(1, -1).to(device=S.device, dtype=S.dtype)
         d = self.decay.view(1, -1).to(device=S.device, dtype=S.dtype)
 
+        eps_abs = 1e-8
+        eps_rel = 1e-6
+        no_stim = (S.abs() <= (eps_abs + eps_rel * (self.in_state.abs() + 1.0)))
+
+        gt = S > T
+        mask = (~gt) & no_stim
         new_o = F.relu(S - T)
-        new_e = torch.where(S > T, new_o, torch.where(S == self.in_state, self.in_state - d, S))
+        new_e = torch.where(S > T, new_o, torch.where(mask, self.in_state - d, S))
 
         self.out_state = new_o
         self.in_state  = new_e
@@ -333,7 +339,7 @@ class FiuriSparseConn(nn.Module):
         if self.ex_idx.numel() > 0:
             src, dst = self.ex_idx[0], self.ex_idx[1]   # (E_ex,)
             Oj = o_pre[:, src]                          # (B, E_ex)
-            contrib = Oj * self.ex_w                    # (B, E_ex)
+            contrib = Oj * self.ex_w.abs()                    # (B, E_ex)
             ex_raw.zero_()
             _scatter_add_batched(contrib, dst, ex_raw)
 
@@ -341,7 +347,7 @@ class FiuriSparseConn(nn.Module):
         if self.in_idx.numel() > 0:
             src, dst = self.in_idx[0], self.in_idx[1]    # (E_in,)
             Oj = o_pre[:, src]                           # (B, E_in)
-            contrib = Oj * self.in_w                     # (B, E_in)
+            contrib = Oj * self.in_w.abs()                     # (B, E_in)
             in_raw.zero_()
             _scatter_add_batched(contrib, dst, in_raw)
 
