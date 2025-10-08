@@ -29,46 +29,30 @@ def create_layer(N_neurons) -> FIURI_node:
         debug=False
     )
 
-def cad_connection(net: Network, src_n, dst_n, conn_W, conn_mask=None, device=None):
+def cad_connection(net, src_n, dst_n, conn_W, conn_mask=None, device=None):
     src_layer = net.layers[src_n]
     dst_layer = net.layers[dst_n]
-
-    # 0) pick a target device
     if device is None:
         try:
             device = next(src_layer.parameters()).device
         except StopIteration:
             device = next(net.parameters()).device
 
-    # 1) ensure weight tensor is on the right device
-    if not isinstance(conn_W, torch.Tensor):
-        conn_W = torch.tensor(conn_W, dtype=torch.float32, device=device)
-    else:
-        conn_W = conn_W.to(device=device, dtype=torch.float32)
+    # weight as a real Parameter on the right device
+    W = torch.as_tensor(conn_W, dtype=torch.float32, device=device)
+    conn = FIURI_Connection(source=src_layer, target=dst_layer, w=W)
 
-    # 2) build connection (w is a registered Parameter on 'device')
-    conn = FIURI_Connection(source=src_layer, target=dst_layer, w=conn_W)
-
-    # 3) apply pruning mask (keep reparam; DO NOT prune.remove)
+    # mask as a registered buffer (1=keep, 0=prune)
     if conn_mask is not None:
         mask = torch.as_tensor(conn_mask, dtype=torch.bool, device=device)
         if mask.shape != conn.w.shape:
             raise ValueError(f"Mask shape {mask.shape} != weight shape {tuple(conn.w.shape)}")
-        torch.nn.utils.prune.custom_from_mask(conn, name="w", mask=mask)
-        # conn now has w_orig (Parameter) and a mask buffer registered
+        conn.register_buffer("mask", mask)
+    else:
+        conn.register_buffer("mask", torch.ones_like(conn.w, dtype=torch.bool, device=device))
 
-    # 4) EXPLICITLY move the connection module (params + buffers + parametrizations)
-    conn.to(device)
-
-    # 5) sanity assert
-    eff = getattr(conn, "w", None)
-    if eff is None:
-        raise RuntimeError("Connection has no attribute 'w' after pruning.")
-    if eff.device != device:
-        raise RuntimeError(f"Effective weight on {eff.device}, expected {device}")
-
-    # 6) register in the net
     net.add_connection(connection=conn, source=src_n, target=dst_n)
+
 
 
 

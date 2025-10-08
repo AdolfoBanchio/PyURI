@@ -7,7 +7,6 @@ from bindsnet.network.topology import AbstractConnection
 
 class FIURI_node(Nodes):
     """  
-
     Nerual node of the FIURI model.
     Sn = En + sum(I_jin) j=1..m where m is ammount of connections(9) 
     
@@ -305,27 +304,27 @@ class FIURI_Connection(AbstractConnection):
             self.s_w = None
 
     def compute(self, s: torch.Tensor) -> torch.Tensor:
-        # language=rst
-        """
-        Compute pre-activations given spikes using connection weights.
-
-        :param s: Incoming spikes.
-        :return: Incoming spikes multiplied by synaptic weights (with or without
-                 decaying spike activation).
-        """
-        # Ensure parameters/buffers are on the same device as input
         dev = s.device
-        w = self.w
-        if w.device != dev:
-            w = w.to(dev)
-        b = None
-        if self.b is not None:
-            b = self.b if self.b.device == dev else self.b.to(dev)
-
-        # Compute multiplication of spike activations by weights and add bias.
+    
+        # effective weight (apply mask if present)
+        w_eff = self.w
+        if hasattr(self, "mask"):
+            w_eff = w_eff * self.mask.to(dev).float()
+    
+        # move if needed (should be a no-op once built right)
+        if w_eff.device != dev:
+            w_eff = w_eff.to(dev)
+    
+        b = self.b.to(dev) if getattr(self, "b", None) is not None else None
+    
+        # Sanity guard (optional while debugging)
+        if w_eff.device != dev:
+            raise RuntimeError(f"device mismatch: s={dev}, w_eff={w_eff.device}")
+    
         flat = s.view(s.size(0), -1).float()
-        post = flat @ w if b is None else flat @ w + b
+        post = flat @ w_eff if b is None else flat @ w_eff + b
         return post.view(s.size(0), *self.target.shape)
+
 
     def compute_window(self, s: torch.Tensor) -> torch.Tensor:
         # language=rst
