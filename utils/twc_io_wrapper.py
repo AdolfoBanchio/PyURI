@@ -114,14 +114,9 @@ class TwcIOWrapper:
         self.obs_encoder = obs_encoder
         self.action_decoder = action_decoder
 
-        # Resolve device from network parameters (fallback CPU)
-        try:
-            p = next(net.parameters())
-            self.device = p.device
-            self.dtype = p.dtype
-        except StopIteration:
-            self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-            self.dtype = torch.float32
+
+        self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        self.dtype = torch.float32
 
         # TWC input/output layers
         assert self.sensory_layer_name in net.layers, f"Missing layer '{self.sensory_layer_name}' in TWC net"
@@ -133,7 +128,8 @@ class TwcIOWrapper:
         # Build sensory input layer and identity connection (channel-wise)
         n_inputs = self.twc_in.shape[0]
         assert self.twc_in.shape[1] == 3, "TWC input layer must have 3 channels"
-
+        
+        self.net.to(self.device)
         # Cache sizes
         self.n_inputs = n_inputs
 

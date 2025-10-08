@@ -254,6 +254,11 @@ class TwcPPOAgent:
 
 
 if __name__ == "__main__":
-    cfg = PPOConfig()
+    device = (
+        torch.device(0)
+        if torch.cuda.is_available() 
+        else torch.device("cpu")
+    )
+    cfg = PPOConfig(device=device)
     agent = TwcPPOAgent(cfg)
     agent.train()
