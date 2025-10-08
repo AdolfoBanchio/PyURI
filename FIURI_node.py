@@ -313,11 +313,18 @@ class FIURI_Connection(AbstractConnection):
         :return: Incoming spikes multiplied by synaptic weights (with or without
                  decaying spike activation).
         """
+        # Ensure parameters/buffers are on the same device as input
+        dev = s.device
+        w = self.w
+        if w.device != dev:
+            w = w.to(dev)
+        b = None
+        if self.b is not None:
+            b = self.b if self.b.device == dev else self.b.to(dev)
+
         # Compute multiplication of spike activations by weights and add bias.
-        if self.b is None:
-            post = s.view(s.size(0), -1).float() @ self.w
-        else:
-            post = s.view(s.size(0), -1).float() @ self.w + self.b
+        flat = s.view(s.size(0), -1).float()
+        post = flat @ w if b is None else flat @ w + b
         return post.view(s.size(0), *self.target.shape)
 
     def compute_window(self, s: torch.Tensor) -> torch.Tensor:
@@ -327,22 +334,26 @@ class FIURI_Connection(AbstractConnection):
         if self.s_w == None:
             # Construct a matrix of shape batch size * window size * dimension of layer
             self.s_w = torch.zeros(
-                self.target.batch_size, self.target.res_window_size, *self.source.shape
+                self.target.batch_size, self.target.res_window_size, *self.source.shape,
+                device=s.device,
             )
+        elif self.s_w.device != s.device:
+            # Move cached window buffer to correct device if needed
+            self.s_w = self.s_w.to(s.device)
 
         # Add the spike vector into the first in first out matrix of windowed (res) spike trains
         self.s_w = torch.cat((self.s_w[:, 1:, :], s[:, None, :]), 1)
 
+        # Ensure parameters/buffers are on the same device as input
+        dev = s.device
+        w = self.w if self.w.device == dev else self.w.to(dev)
+        b = None
+        if self.b is not None:
+            b = self.b if self.b.device == dev else self.b.to(dev)
+
         # Compute multiplication of spike activations by weights and add bias.
-        if self.b is None:
-            post = (
-                self.s_w.view(self.s_w.size(0), self.s_w.size(1), -1).float() @ self.w
-            )
-        else:
-            post = (
-                self.s_w.view(self.s_w.size(0), self.s_w.size(1), -1).float() @ self.w
-                + self.b
-            )
+        flat = self.s_w.view(self.s_w.size(0), self.s_w.size(1), -1).float()
+        post = (flat @ w) if b is None else (flat @ w + b)
 
         return post.view(
             self.s_w.size(0), self.target.res_window_size, *self.target.shape
