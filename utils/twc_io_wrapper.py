@@ -1,7 +1,7 @@
 import math
 from dataclasses import dataclass
 from typing import Callable, Optional, Tuple, List
-
+from typing import NamedTuple
 import torch
 import numpy as np
 from bindsnet.network import Network
@@ -86,7 +86,6 @@ def default_action_decoder(
     a = torch.tanh(gain * (fwd - rev))
     return a.unsqueeze(-1)  # (batch, 1)
 
-
 class TwcIOWrapper:
     """
     Wrap a TWC Network (utils.twc_builder.build_TWC()) with sensory Input wiring
@@ -94,6 +93,8 @@ class TwcIOWrapper:
     MountainCarContinuous (1-D action in [-1, 1]).
 
     - Exposes step(obs) -> action and access to last out_state for policy/value heads.
+
+    TODO: Add arguments description.
     """
 
     def __init__(
@@ -102,11 +103,8 @@ class TwcIOWrapper:
         *,
         sensory_layer_name: str = "input",
         output_layer_name: str = "output",
-        input_name: str = "sensory",
         obs_encoder: Optional[Callable[[torch.Tensor, int, torch.device], torch.Tensor]] = None,
         action_decoder: Optional[Callable[[torch.Tensor], torch.Tensor]] = None,
-        obs_gain: float = 1.0,
-        act_gain: float = 1.0,
     ) -> None:
         self.net = net
         self.sensory_layer_name = sensory_layer_name
@@ -115,8 +113,6 @@ class TwcIOWrapper:
 
         self.obs_encoder = obs_encoder
         self.action_decoder = action_decoder
-        self.obs_gain = obs_gain
-        self.act_gain = act_gain
 
         # Resolve device from network parameters (fallback CPU)
         try:
@@ -138,15 +134,6 @@ class TwcIOWrapper:
         n_inputs = self.twc_in.shape[0]
         assert self.twc_in.shape[1] == 3, "TWC input layer must have 3 channels"
 
-        """   
-        self.input = Input(shape=(n_inputs, 3))
-        net.add_layer(self.input, name=self.input_name)
-
-        # Identity across all neurons and channels
-        eye = torch.eye(n_inputs * 3, dtype=self.dtype)
-        con = Connection(source=self.input, target=self.twc_in, w=eye)
-        net.add_connection(con, source=self.input_name, target=self.sensory_layer_name)
-        """
         # Cache sizes
         self.n_inputs = n_inputs
 
@@ -180,13 +167,13 @@ class TwcIOWrapper:
 
     def encode_obs(self, obs: torch.Tensor) -> torch.Tensor:
         if self.obs_encoder is None:
-            return default_obs_encoder(obs.to(self.device, dtype=self.dtype), n_inputs=self.n_inputs, device=self.device, gain=self.obs_gain)
+            return default_obs_encoder(obs.to(self.device, dtype=self.dtype), n_inputs=self.n_inputs, device=self.device)
         # Backward-compat with simple callables expecting (obs, n_inputs, device)
         return self.obs_encoder(obs.to(self.device, dtype=self.dtype), self.n_inputs, self.device)
 
     def decode_action(self, out_state: torch.Tensor) -> torch.Tensor:
         if self.action_decoder is None:
-            return default_action_decoder(out_state, gain=self.act_gain)
+            return default_action_decoder(out_state)
         return self.action_decoder(out_state)
 
     def step(self, obs) -> Tuple[torch.Tensor, torch.Tensor]:
@@ -195,7 +182,9 @@ class TwcIOWrapper:
 
         obs: single observation (2,), or batched (B,2), or with extra
              singleton dims like (2,1) / (1,2,1). All are standardized to (B,2).
-        returns: (action: (batch, 1), out_state: (batch, n_out))
+        returns: out_state: (batch, n_out))
+
+        Step action must be calculated using the self.decode_action
         """
         obs_std = self._standardize_obs(obs)
         x = self.encode_obs(obs_std)  # (B, n_inputs, 3)
@@ -213,8 +202,7 @@ class TwcIOWrapper:
 
         # Read out_state from output layer (batch, n_out)
         out_state = self.twc_out.out_state
-        action = self.decode_action(out_state)
-        return action, out_state
+        return out_state
 
     def reset(self) -> None:
         """Reset internal states across TWC layers (call at episode boundaries)."""
@@ -238,7 +226,8 @@ class InterfacePair:
 def make_pairwise_in_encoder(
     pairs: List[InterfacePair],
     *,
-    set_inactive_to_min_state: bool = False,
+    set_inactive_to_min_state: bool = True,
+    clamp_to_state_range: bool = True
 ) -> Callable[[torch.Tensor, int, torch.device], torch.Tensor]:
     """
     Build an observation encoder that mimics the pairwise mapping:
@@ -256,26 +245,35 @@ def make_pairwise_in_encoder(
 
         for p in pairs:
             v = obs[:, p.obs_index]
-            # Compute linear mapped potentials for pos/neg side
-            pos_cor = torch.clamp((v / p.maxVal), min=-np.inf, max=np.inf)
-            pos_pot = (p.maxState - p.minState) * pos_cor + p.minState
-
-            neg_cor = torch.clamp((-v / (-p.minVal)), min=-np.inf, max=np.inf)
-            neg_pot = (p.maxState - p.minState) * (-neg_cor) + p.minState
-
+            
             mask_pos = v >= p.valleyVal
             mask_neg = ~mask_pos
+            rng = (p.maxState - p.minState)
 
+            
             # Active side uses EX channel; inactive gets zero (or minState if enabled)
             if mask_pos.any():
-                x[mask_pos, p.positive_index, 0] = pos_pot[mask_pos]
+                cor = v[mask_pos] / p.maxVal
+                pot = rng * cor + p.minState
+                if clamp_to_state_range:
+                    pot = pot.clamp(min=p.minState, max=p.maxState)
+                
+                x[mask_pos, p.positive_index, 0] = pot
+
                 if set_inactive_to_min_state:
                     x[mask_pos, p.negative_index, 0] = p.minState
+            
             if mask_neg.any():
-                x[mask_neg, p.negative_index, 0] = neg_pot[mask_neg]
+                cor = v[mask_neg] / (-p.minVal)
+                pot = rng * (-cor) + p.minState
+                if clamp_to_state_range:
+                    pot = pot.clamp(min=p.minState, max=p.maxState)
+                
+                x[mask_neg, p.negative_index, 0] = pot
+
                 if set_inactive_to_min_state:
                     x[mask_neg, p.positive_index, 0] = p.minState
-
+            
         return x
 
     return encoder
@@ -283,7 +281,8 @@ def make_pairwise_in_encoder(
 
 def mountaincar_pair_encoder(
     *,
-    set_inactive_to_min_state: bool = False,
+    set_inactive_to_min_state: bool = True,
+    clamp_to_state_range: bool = True
 ) -> Callable[[torch.Tensor, int, torch.device], torch.Tensor]:
     """
     Convenience factory using default input order from utils/TWC_fiu.json:
@@ -295,4 +294,74 @@ def mountaincar_pair_encoder(
         InterfacePair(obs_index=0, valleyVal=-0.3, minVal=-1.2, maxVal=0.6, positive_index=1, negative_index=2),
         InterfacePair(obs_index=1, valleyVal=0.0,  minVal=-0.1, maxVal=0.1, positive_index=3, negative_index=0),
     ]
-    return make_pairwise_in_encoder(pairs, set_inactive_to_min_state=set_inactive_to_min_state)
+    return make_pairwise_in_encoder(pairs, 
+                                    set_inactive_to_min_state=set_inactive_to_min_state,
+                                    clamp_to_state_range=clamp_to_state_range)
+
+
+# Stochastic decoder intended to be used for actor policy 
+
+class PolicyOut(NamedTuple):
+    action: torch.Tensor    # (B,1) sampled action in [-1,1]
+    log_prob: torch.Tensor  # (B,1) log π(a|s) with tanh correction
+    mean: torch.Tensor      # (B,1) deterministic action = tanh(base_mean)
+    std: torch.Tensor       # (B,1) base Normal std (pre-tanh)
+    entropy: torch.Tensor   # (B,1) base Normal entropy (proxy)
+
+def stochastic_action_decoder(
+    out_state: torch.Tensor,
+    *,
+    gain: float = 1.0,
+    min_log_std: float = -5.0,
+    max_log_std: float = 2.0,
+    deterministic: bool = False,
+    eps: float = 1e-6,
+) -> PolicyOut:
+    """
+    Decode TWC output (B,2) ordered [REV, FWD] into a tanh-squashed Gaussian.
+
+    Base Normal: u ~ N(mu, std), action a = tanh(u).
+    log_prob includes change-of-variables: log π(a) = log N(u|mu,std) - log(1 - tanh(u)^2).
+
+    Returns (action, log_prob, mean, std, entropy) with shape (B,1) each.
+    """
+    assert out_state.ndim == 2 and out_state.shape[1] == 2, "expected (B,2)"
+    rev = out_state[:, 0]
+    fwd = out_state[:, 1]
+
+    # Unsquashed mean and bounded log-std
+    base_mean = gain * (fwd - rev)  # (B,)
+    raw = fwd + rev                 # (B,)
+    log_std = min_log_std + 0.5 * (torch.tanh(raw) + 1.0) * (max_log_std - min_log_std)
+    log_std = torch.clamp(log_std, min_log_std, max_log_std)
+    std = torch.exp(log_std)
+    var = std * std
+
+    # Deterministic path (evaluation-only)
+    mean = torch.tanh(base_mean)
+    if deterministic:
+        zeros = torch.zeros_like(mean)
+        entropy = 0.5 * (1.0 + torch.log(2 * torch.pi * var + eps))
+        return PolicyOut(mean.unsqueeze(-1), zeros.unsqueeze(-1), mean.unsqueeze(-1), std.unsqueeze(-1), entropy.unsqueeze(-1))
+
+    # Reparameterized sampling in latent space
+    noise = torch.randn_like(base_mean)
+    u = base_mean + std * noise          # (B,)
+    a = torch.tanh(u)                    # (B,)
+
+    # Base Normal log-prob
+    LOG_2PI = 1.8378770664093453  # ln(2π)
+    logp_base = -0.5 * (((u - base_mean) ** 2) / (var + eps) + 2.0 * log_std + LOG_2PI)  # (B,)
+
+    # Squash correction: sum over dims; here 1-D so just one term
+    squash_correction = torch.log(1.0 - a * a + eps)  # (B,)
+    log_prob = (logp_base - squash_correction)        # (B,)
+
+    # Base Normal entropy (proxy)
+    entropy = 0.5 * (1.0 + torch.log(2 * torch.pi * var + eps))  # (B,)
+
+    return PolicyOut(a.unsqueeze(-1), 
+                     log_prob.unsqueeze(-1), 
+                     mean.unsqueeze(-1), 
+                     std.unsqueeze(-1), 
+                     entropy.unsqueeze(-1))

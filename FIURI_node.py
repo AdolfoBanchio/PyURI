@@ -213,12 +213,32 @@ class FIURI_node(Nodes):
         return self.out_state
 
     def reset_state_variables(self) -> None:
-        """ 
-        Reset neuron states at episode boundaries
-        TODO: see what actually needs to be reset, because in 
-                and out state are important for future forward computations 
         """
+        Reset neuron states at episode boundaries.
+        Restore internal (E) and output (O) states to their configured
+        initial values instead of zeroing them.
+        """
+        # Let base class reset its internals (e.g., traces)
         super().reset_state_variables()
+
+        # Restore E and O to initial configured values if allocated
+        if self.in_state is not None:
+            self.in_state.fill_(self._init_E)
+        if self.out_state is not None:
+            self.out_state.fill_(self._init_O)
+
+        # Rebuild exposed activity tensor `s` to reflect the reset out_state
+        # If shapes are available, set channel 0 to out_state and others to zero.
+        # Otherwise, fall back to zeroing.
+        if self.s is not None:
+            try:
+                if isinstance(self.out_state, torch.Tensor) and self.out_state.ndim >= 2:
+                    zeros = torch.zeros_like(self.out_state)
+                    self.s = torch.stack([self.out_state, zeros, zeros], dim=-1)
+                else:
+                    self.s.zero_()
+            except Exception:
+                self.s.zero_()
         
 
 class FIURI_Connection(AbstractConnection):

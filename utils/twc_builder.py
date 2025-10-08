@@ -19,7 +19,7 @@ def create_layer(N_neurons) -> FIURI_node:
         num_cells=N_neurons,
         initial_in_state=0.0,
         initial_out_state=0.0,
-        initial_threshold=0,
+        initial_threshold=0.3,
         initial_decay=0.2,
         learn_threshold=True,
         learn_decay=True,
@@ -51,7 +51,7 @@ def cad_connection(net: Network, src_n, dst_n, conn_W, conn_mask=None):
             mask = conn_mask
         # torch.nn.utils.prune expects the mask to be registered on the module
         prune.custom_from_mask(conn, name='w', mask=mask)
-        prune.remove(conn, 'w')
+        #prune.remove(conn, 'w')
     
     net.add_connection(connection=conn,
                        source=src_n,
@@ -65,14 +65,11 @@ def build_TWC() -> Network:
     with open(json_path, "r") as f:
         net_data = json.load(f)
 
-    gropus = net_data["groups"]
+    groups = net_data["groups"]
     matrices = build_tw_matrices(net_data)
 
-    for layer in gropus.keys():
-        n = len(gropus[layer])
-        l_name = layer
-        net.add_layer(create_layer(n),
-                      name=l_name)
+    for layer_name, neuron_list in groups.items():
+        net.add_layer(create_layer(len(neuron_list)), name=layer_name)
 
     for conn in matrices["connections"]:
         source_n = conn["source"]  # layer names

@@ -23,11 +23,12 @@ episode_over = False
 total_reward = 0
 episode = 0
 
-while not episode_over:
+for _ in range(1):
     print(f"== episode {episode} ==")
 
-    action, out_s = mc_wrapper.step(obs)
-    
+    out_s = mc_wrapper.step(obs)
+    action =  mc_wrapper.decode_action(out_s)
+
     obs, reward, terminated, truncated, info = env.step(action.detach().numpy())
     print(f"obs from env {obs}")
     obs_tensor = torch.as_tensor(obs, dtype=torch.float32).unsqueeze(0)
