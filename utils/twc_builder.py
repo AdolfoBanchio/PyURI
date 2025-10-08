@@ -29,49 +29,47 @@ def create_layer(N_neurons) -> FIURI_node:
         debug=False
     )
 
-def cad_connection(net: Network, src_n, dst_n, conn_W, conn_mask=None):
-    """  
-        Creates and ADDS connection to network.
-    """
+def cad_connection(net: Network, src_n, dst_n, conn_W, conn_mask=None, device=None):
     src_layer = net.layers[src_n]
     dst_layer = net.layers[dst_n]
 
-    conn = FIURI_Connection(source=src_layer,
-                      target=dst_layer,
-                      w=conn_W)
-    # If a binary mask is provided, prune (zero) disallowed weights and
-    # remove the reparam so conn.w is a plain Parameter with zeros baked in.
-    # Mask semantics: 1/True -> keep, 0/False -> prune to zero.
+    # 0) pick a target device
+    if device is None:
+        try:
+            device = next(src_layer.parameters()).device
+        except StopIteration:
+            device = next(net.parameters()).device
+
+    # 1) ensure weight tensor is on the right device
+    if not isinstance(conn_W, torch.Tensor):
+        conn_W = torch.tensor(conn_W, dtype=torch.float32, device=device)
+    else:
+        conn_W = conn_W.to(device=device, dtype=torch.float32)
+
+    # 2) build connection (w is a registered Parameter on 'device')
+    conn = FIURI_Connection(source=src_layer, target=dst_layer, w=conn_W)
+
+    # 3) apply pruning mask (keep reparam; DO NOT prune.remove)
     if conn_mask is not None:
-        # Ensure mask is float/bool tensor on same device/dtype
-        if conn_mask.dtype != torch.bool and conn_mask.dtype != torch.uint8:
-            mask = conn_mask.to(dtype=conn.w.dtype)
-        else:
-            mask = conn_mask
+        mask = torch.as_tensor(conn_mask, dtype=torch.bool, device=device)
+        if mask.shape != conn.w.shape:
+            raise ValueError(f"Mask shape {mask.shape} != weight shape {tuple(conn.w.shape)}")
+        torch.nn.utils.prune.custom_from_mask(conn, name="w", mask=mask)
+        # conn now has w_orig (Parameter) and a mask buffer registered
 
-        # torch.nn.utils.prune expects the mask to be registered on the module
-        prune.custom_from_mask(conn, name='w', mask=mask)
-        #prune.remove(conn, 'w')
-    
-    try:
-        target_device = next(src_layer.parameters()).device
-    except StopIteration:
-        target_device = next(net.parameters()).device
+    # 4) EXPLICITLY move the connection module (params + buffers + parametrizations)
+    conn.to(device)
 
-    # ensure effective weight is a registered Parameter on the correct device
-    with torch.no_grad():
-        if hasattr(conn, 'w_orig'):          # pruned reparam
-            conn.w_orig.data = conn.w_orig.data.to(target_device)
-            # mask is a buffer and will move with module; be explicit if you want:
-            if hasattr(conn, 'w_mask'):
-                conn.register_buffer('w_mask', conn.w_mask.to(target_device))
-        else:
-            if not isinstance(conn.w, torch.nn.Parameter):
-                conn.w = torch.nn.Parameter(conn.w)
-            conn.w.data = conn.w.data.to(target_device)
-    net.add_connection(connection=conn,
-                       source=src_n,
-                       target=dst_n)
+    # 5) sanity assert
+    eff = getattr(conn, "w", None)
+    if eff is None:
+        raise RuntimeError("Connection has no attribute 'w' after pruning.")
+    if eff.device != device:
+        raise RuntimeError(f"Effective weight on {eff.device}, expected {device}")
+
+    # 6) register in the net
+    net.add_connection(connection=conn, source=src_n, target=dst_n)
+
 
 
 def build_TWC() -> Network:
