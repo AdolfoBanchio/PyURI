@@ -13,8 +13,7 @@ import torch.nn.utils.prune as prune
     and constructs the Bindsnet netwrok using FIURI nodes. 
 """
 json_path = os.path.join(os.path.dirname(__file__),"TWC_fiu.json")
-device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-print(f"builder {device}")
+
 def create_layer(N_neurons) -> FIURI_node:
     return FIURI_node(
         num_cells=N_neurons,
@@ -28,7 +27,7 @@ def create_layer(N_neurons) -> FIURI_node:
         clamp_max=10.0,
         sum_input=True,
         debug=False
-    ).to(device=device)
+    )
 
 def cad_connection(net: Network, src_n, dst_n, conn_W, conn_mask=None):
     """  
@@ -40,8 +39,6 @@ def cad_connection(net: Network, src_n, dst_n, conn_W, conn_mask=None):
     conn = FIURI_Connection(source=src_layer,
                       target=dst_layer,
                       w=conn_W)
-    conn.to(device=device)
-
     # If a binary mask is provided, prune (zero) disallowed weights and
     # remove the reparam so conn.w is a plain Parameter with zeros baked in.
     # Mask semantics: 1/True -> keep, 0/False -> prune to zero.
@@ -52,7 +49,6 @@ def cad_connection(net: Network, src_n, dst_n, conn_W, conn_mask=None):
         else:
             mask = conn_mask
 
-        mask.to(device=device)
         # torch.nn.utils.prune expects the mask to be registered on the module
         prune.custom_from_mask(conn, name='w', mask=mask)
         #prune.remove(conn, 'w')
@@ -62,9 +58,7 @@ def cad_connection(net: Network, src_n, dst_n, conn_W, conn_mask=None):
 
 
 def build_TWC() -> Network:
-
     net = Network()
-    net.to(device=device)
 
     with open(json_path, "r") as f:
         net_data = json.load(f)

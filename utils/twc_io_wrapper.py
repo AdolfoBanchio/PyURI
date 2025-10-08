@@ -130,6 +130,30 @@ class TwcIOWrapper:
         assert self.twc_in.shape[1] == 3, "TWC input layer must have 3 channels"
         
         self.net.to(self.device)
+        # Debug: print device of relevant torch tensors in the network
+        try:
+            # Print devices per submodule (layers, connections) considering only local params/buffers
+            for mod_name, mod in self.net.named_modules():
+                local_devs = []
+                for _, p in mod.named_parameters(recurse=False):
+                    d = str(p.device)
+                    if d not in local_devs:
+                        local_devs.append(d)
+                for _, b in mod.named_buffers(recurse=False):
+                    d = str(b.device)
+                    if d not in local_devs:
+                        local_devs.append(d)
+                if local_devs:
+                    label = mod_name if mod_name else 'Network'
+                    print(f"[Device] {label}: {', '.join(local_devs)}")
+            # Fallback if nothing was found; still show chosen device
+            has_any = any(True for _ in self.net.parameters()) or any(True for _ in self.net.buffers())
+            if not has_any:
+                print(f"[Device] Network default: {self.device}")
+        except Exception:
+            # Non-fatal: ensure init proceeds even if inspection fails
+            print(f"[Device] Network (fallback): {self.device}")
+        
         # Cache sizes
         self.n_inputs = n_inputs
 
