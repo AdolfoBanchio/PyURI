@@ -114,8 +114,8 @@ class FIURIModule(nn.Module):
         """  
             Detaches states tensors from graph, intended to be used while learning
         """
-        self.in_state.detach()
-        self.out_state.detach()
+        self.in_state = self.in_state.detach()
+        self.out_state = self.out_state.detach()
 
     def _compute_gj_sum(self, gj_bundle, o_pre: torch.Tensor) -> torch.Tensor:
         src, dst, w = gj_bundle
@@ -313,9 +313,9 @@ class FiuriSparseConn(nn.Module):
         self.register_buffer("in_idx", in_edges)   # (2, E_in)
         self.register_buffer("gj_idx", gj_edges)   # (2, E_gj)
         # Per-edge learnable weights
-        self.ex_w = nn.Parameter(torch.empty(self.ex_idx.shape[1]).normal_(0, ex_init))
-        self.in_w = nn.Parameter(torch.empty(self.in_idx.shape[1]).normal_(0, in_init))
-        self.gj_w = nn.Parameter(torch.empty(self.gj_idx.shape[1]).normal_(0, gj_init))
+        self.ex_w = nn.Parameter(torch.empty(self.ex_idx.shape[1]).normal_(0, ex_init), requires_grad=True)
+        self.in_w = nn.Parameter(torch.empty(self.in_idx.shape[1]).normal_(0, in_init), requires_grad=True)
+        self.gj_w = nn.Parameter(torch.empty(self.gj_idx.shape[1]).normal_(0, gj_init), requires_grad=True)
 
     def forward(self, o_pre):
         """

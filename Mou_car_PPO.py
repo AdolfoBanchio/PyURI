@@ -172,13 +172,11 @@ class TwcPPOAgent:
         # separate (or shared) optimizer — start shared for simplicity
         params = list(self.actor.net.parameters()) + list(self.critic.net.parameters()) + list(self.value_head.parameters())
         self.optimizer = optim.Adam(params, lr=cfg.lr)
-        
+        assert any(p.requires_grad for p in self.actor.net.parameters())
         self.ent_coef     = 0.01     # small exploration
         self.target_kl    = 0.03     # early-stop threshold per epoch
         self.vf_clip_coef = 0.2      # value loss clipping
         
-
-    @torch.no_grad()
     def rollout(self, steps: int):
         buf = Rollout(steps, obs_dim=self.obs_space.shape[0], device=self.device)
 
@@ -189,13 +187,15 @@ class TwcPPOAgent:
             obs_t = torch.as_tensor(obs, dtype=torch.float32, device=self.device).unsqueeze(0)
 
             # actor forward
-            out_act = self.actor.step(obs_t)             # (1,2)
+            with torch.no_grad():
+                out_act = self.actor.step(obs_t)             # (1,2)
             mean, log_std = policy_params_from_outstate(out_act)
             a = tanh_gaussian_sample(mean, log_std)      # (1,1)
             logp = tanh_gaussian_logp(mean, log_std, a)  # (1,1)
 
             # critic forward
-            out_crit = self.critic.step(obs_t)           # (1,2)
+            with torch.no_grad():
+                out_crit = self.critic.step(obs_t)           # (1,2)
             v = self.value_head(out_crit)                # (1,1)
 
             act_np = a.squeeze(0).cpu().numpy()
@@ -210,7 +210,8 @@ class TwcPPOAgent:
                 self.actor.reset(); self.critic.reset()
 
         # bootstrap from critic
-        last_out = self.critic.step(torch.as_tensor(obs, dtype=torch.float32, device=self.device).unsqueeze(0))
+        with torch.no_grad():
+            last_out = self.critic.step(torch.as_tensor(obs, dtype=torch.float32, device=self.device).unsqueeze(0))
         last_value = self.value_head(last_out)  # (1,1)
 
         adv, ret = compute_gae(buf.rew, buf.val, buf.done, last_value, self.cfg.gamma, self.cfg.gae_lambda)
@@ -239,8 +240,8 @@ class TwcPPOAgent:
                 mb_ret  = batch["returns"][ids]
 
                 # fresh states per minibatch
-                self.actor.reset()
-                self.critic.reset()
+                self.actor.detach()
+                self.critic.detach()
 
                 out_act = self.actor.step(mb_obs)                     # (B,2)
                 mean, log_std = policy_params_from_outstate(out_act)
@@ -265,17 +266,17 @@ class TwcPPOAgent:
 
                 self.optimizer.zero_grad(set_to_none=True)
                 loss.backward()
+                actor_grads = [p.grad for p in self.actor.net.parameters() if p.grad is not None]
+                assert len(actor_grads) > 0, "no actor gradients — check no_grad/detach"
                 nn.utils.clip_grad_norm_(self.actor.net.parameters(), self.cfg.max_grad_norm)
                 nn.utils.clip_grad_norm_(self.critic.net.parameters(), self.cfg.max_grad_norm)
                 nn.utils.clip_grad_norm_(self.value_head.parameters(), self.cfg.max_grad_norm)
                 self.optimizer.step()
 
-                with torch.no_grad():
-                    approx_kl = (mb_oldp - new_logp).mean().abs().item()
-                    clip_frac = ((ratio - 1.0).abs() > self.cfg.clip_coef).float().mean().item()
-                    approx_kl_epoch.append(approx_kl)
-                    print(f"pg={policy_loss.item():.3f} v={v_loss.item():.3f} kl≈{approx_kl:.4f} clip={clip_frac:.2f}")
-
+            with torch.no_grad():
+                approx_kl = (mb_oldp - new_logp).mean().abs().item()
+                clipfrac  = ((ratio - 1.0).abs() > self.cfg.clip_coef).float().mean().item()
+                print(f"pg={policy_loss.item():.3f} v={v_loss.item():.3f} kl≈{approx_kl:.4f} clip={clipfrac:.2f}")
             # KL early stop per epoch
             if np.mean(approx_kl_epoch) > 1.5 * self.target_kl:
                 print(f"Early stop: KL {np.mean(approx_kl_epoch):.4f} > {1.5*self.target_kl:.4f}")
