@@ -81,8 +81,8 @@ class FIURI_node(Nodes):
         T_init = torch.full((num_cells,), float(initial_threshold), dtype=torch.float32)
         d_init = torch.full((num_cells,), float(initial_decay),    dtype=torch.float32)
 
-        self.threshold = nn.Parameter(T_init) if learn_threshold else T_init
-        self.decay     = nn.Parameter(d_init) if learn_decay     else d_init
+        self.threshold = nn.Parameter(T_init, requires_grad=True) if learn_threshold else T_init
+        self.decay     = nn.Parameter(d_init, requires_grad=True) if learn_decay     else d_init
 
         # --- persistent state buffers (allocated lazily with correct batch/device/dtype)
         self.register_buffer("in_state", torch.tensor(initial_in_state, dtype=torch.float))  # E (batch, n)

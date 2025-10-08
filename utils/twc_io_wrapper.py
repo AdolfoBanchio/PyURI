@@ -154,6 +154,12 @@ class TwcIOWrapper:
             # Non-fatal: ensure init proceeds even if inspection fails
             print(f"[Device] Network (fallback): {self.device}")
         
+        print('--- children ---')
+        for n, m in net.named_children():
+            print('child:', n, type(m))
+        print('--- params ---')
+        for n, p in net.named_parameters():
+            print('param:', n, p.device)
         # Cache sizes
         self.n_inputs = n_inputs
 

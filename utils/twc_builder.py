@@ -20,7 +20,7 @@ def create_layer(N_neurons) -> FIURI_node:
         initial_in_state=0.0,
         initial_out_state=0.0,
         initial_threshold=0.3,
-        initial_decay=0.2,
+        initial_decay=2.2,
         learn_threshold=True,
         learn_decay=True,
         clamp_min=-10.0,
@@ -52,6 +52,23 @@ def cad_connection(net: Network, src_n, dst_n, conn_W, conn_mask=None):
         # torch.nn.utils.prune expects the mask to be registered on the module
         prune.custom_from_mask(conn, name='w', mask=mask)
         #prune.remove(conn, 'w')
+    
+    try:
+        target_device = next(src_layer.parameters()).device
+    except StopIteration:
+        target_device = next(net.parameters()).device
+
+    # ensure effective weight is a registered Parameter on the correct device
+    with torch.no_grad():
+        if hasattr(conn, 'w_orig'):          # pruned reparam
+            conn.w_orig.data = conn.w_orig.data.to(target_device)
+            # mask is a buffer and will move with module; be explicit if you want:
+            if hasattr(conn, 'w_mask'):
+                conn.register_buffer('w_mask', conn.w_mask.to(target_device))
+        else:
+            if not isinstance(conn.w, torch.nn.Parameter):
+                conn.w = torch.nn.Parameter(conn.w)
+            conn.w.data = conn.w.data.to(target_device)
     net.add_connection(connection=conn,
                        source=src_n,
                        target=dst_n)
