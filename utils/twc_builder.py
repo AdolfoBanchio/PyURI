@@ -13,6 +13,7 @@ import torch.nn.utils.prune as prune
     and constructs the Bindsnet netwrok using FIURI nodes. 
 """
 json_path = os.path.join(os.path.dirname(__file__),"TWC_fiu.json")
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 def create_layer(N_neurons) -> FIURI_node:
     return FIURI_node(
@@ -27,7 +28,7 @@ def create_layer(N_neurons) -> FIURI_node:
         clamp_max=10.0,
         sum_input=True,
         debug=False
-    )
+    ).to(device=device)
 
 def cad_connection(net: Network, src_n, dst_n, conn_W, conn_mask=None):
     """  
@@ -38,7 +39,7 @@ def cad_connection(net: Network, src_n, dst_n, conn_W, conn_mask=None):
 
     conn = FIURI_Connection(source=src_layer,
                       target=dst_layer,
-                      w=conn_W)
+                      w=conn_W).to(device=device)
 
     # If a binary mask is provided, prune (zero) disallowed weights and
     # remove the reparam so conn.w is a plain Parameter with zeros baked in.
@@ -79,7 +80,6 @@ def build_TWC() -> Network:
 
         cad_connection(net, source_n, target_n, W, M)
 
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     net.to(device)
     return net
     
