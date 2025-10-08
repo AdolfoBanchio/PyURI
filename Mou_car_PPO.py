@@ -19,31 +19,31 @@ def atanh_safe(a: torch.Tensor, eps: float = 1e-6) -> torch.Tensor:
     # atanh(a) = 0.5 * (log1p(a) - log1p(-a))
     return 0.5 * (torch.log1p(a) - torch.log1p(-a))
 
-def action_log_prob_from_outstate(
-    out_state: torch.Tensor,
-    action: torch.Tensor,
-    *,
-    gain: float = 1.0,
-    min_log_std: float = -5.0,
-    max_log_std: float = 2.0,
-    eps: float = 1e-6,
-) -> torch.Tensor:
-    assert out_state.ndim == 2 and out_state.shape[1] == 2 and action.shape[-1] == 1
-    rev = out_state[:, 0]
-    fwd = out_state[:, 1]
-    base_mean = gain * (fwd - rev)
-    raw = fwd + rev
+LOG_2PI = 1.8378770664093453
+
+def policy_params_from_outstate(out_state, *, gain=1.0, min_log_std=-5.0, max_log_std=2.0):
+    # out_state: (B,2) -> [rev, fwd]
+    rev, fwd = out_state[:, 0], out_state[:, 1]
+    mean = gain * (fwd - rev)
+    raw  = fwd + rev
     log_std = min_log_std + 0.5 * (torch.tanh(raw) + 1.0) * (max_log_std - min_log_std)
     log_std = torch.clamp(log_std, min_log_std, max_log_std)
-    std = torch.exp(log_std)
-    var = std * std
+    return mean.unsqueeze(-1), log_std.unsqueeze(-1)  # (B,1), (B,1)
 
-    a = action.squeeze(-1)
-    u = atanh_safe(a, eps=eps)                 # invert tanh
-    LOG_2PI = 1.8378770664093453
-    logp_base = -0.5 * (((u - base_mean) ** 2) / (var + eps) + 2.0 * log_std + LOG_2PI)
-    squash = torch.log(1.0 - a * a + eps)
-    return (logp_base - squash).unsqueeze(-1)  # (B,1)
+def tanh_gaussian_logp(mean, log_std, action, eps=1e-6):
+    # action in [-1,1], shape (B,1)
+    std = log_std.exp()
+    u   = atanh_safe(action, eps=eps)                       # pre-squash
+    logp_base = -0.5 * (((u - mean)**2)/(std*std + eps) + 2.0*log_std + LOG_2PI)
+    squash = torch.log(1.0 - action*action + eps)
+    return logp_base - squash  # (B,1)
+
+@torch.no_grad()
+def tanh_gaussian_sample(mean, log_std):
+    std = log_std.exp()
+    u   = mean + std * torch.randn_like(std)
+    a   = torch.tanh(u)
+    return a
 
 class Rollout:
     """ 
@@ -111,22 +111,24 @@ class PPOConfig:
     gamma: float = 0.99
     gae_lambda: float = 0.95
     clip_coef: float = 0.2
-    ent_coef: float = 0.0
+    ent_coef: float = 0.01
     vf_coef: float = 0.5
     max_grad_norm: float = 0.5
     lr: float = 3e-4
-    seed: int = 0
+    seed: int = 42
     device: str = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 
 class ValueHead(nn.Module):
-    def __init__(self, twc: nn.Module,in_dim: int = 2):
+    def __init__(self, in_dim: int = 2):
         super().__init__()
-        self.twc = twc
-        self.v = nn.Linear(in_dim, 1)
-
+        self.v = nn.Sequential(
+            nn.LayerNorm(in_dim),
+            nn.Linear(in_dim, 64),
+            nn.Tanh(),
+            nn.Linear(64, 1),
+        )
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        
         return self.v(x)
 
 
@@ -136,7 +138,8 @@ class TwcPPOAgent:
         torch.manual_seed(cfg.seed)
         np.random.seed(cfg.seed)
 
-        self.env = gym.make(cfg.env_id)
+        self.device = cfg.device
+        self.env = gym.make(cfg.env_id, render_mode="rgb_array")
         try:
             self.env.reset(seed=cfg.seed)
             self.env.action_space.seed(cfg.seed)
@@ -147,75 +150,86 @@ class TwcPPOAgent:
         self.obs_space = self.env.observation_space
         self.act_space = self.env.action_space
 
-        net = build_twc()
-        self.wrapper = TwcIOWrapper(
-            net=net,
+        net_actor = build_twc()
+        net_critic = build_twc()
+        
+        self.actor = TwcIOWrapper(
+            net=net_actor,
             device=cfg.device,
-            obs_encoder=mountaincar_pair_encoder(),   
-            action_decoder=stochastic_action_decoder  # used only during rollout
+            obs_encoder=mountaincar_pair_encoder(),
+            action_decoder=None,  # we’ll sample ourselves via tanh_gaussian_*
         )
-
-        self.value_head = ValueHead(twc=build_twc(),in_dim=2).to(cfg.device)
-
-        params = list(self.wrapper.net.parameters()) + list(self.value_head.parameters())
+        
+        self.critic = TwcIOWrapper(
+            net=net_critic,
+            device=cfg.device,
+            obs_encoder=mountaincar_pair_encoder(),
+            action_decoder=None,
+        )
+        
+        self.value_head = ValueHead(in_dim=2).to(cfg.device)
+        
+        # separate (or shared) optimizer — start shared for simplicity
+        params = list(self.actor.net.parameters()) + list(self.critic.net.parameters()) + list(self.value_head.parameters())
         self.optimizer = optim.Adam(params, lr=cfg.lr)
+        
+        self.ent_coef     = 0.01     # small exploration
+        self.target_kl    = 0.03     # early-stop threshold per epoch
+        self.vf_clip_coef = 0.2      # value loss clipping
+        
 
-        self.device = torch.device(cfg.device)
-    
     @torch.no_grad()
     def rollout(self, steps: int):
         buf = Rollout(steps, obs_dim=self.obs_space.shape[0], device=self.device)
 
         obs, _ = self.env.reset()
-        self.wrapper.reset()
-        
+        self.actor.reset(); self.critic.reset()
+
         for t in range(steps):
-            obs_t = torch.as_tensor(obs, dtype=torch.float32, device=self.device).unsqueeze(0)  # (1,2)
+            obs_t = torch.as_tensor(obs, dtype=torch.float32, device=self.device).unsqueeze(0)
 
-            # forward actor: out_state -> decode to (action, logp, ...)
-            out_state = self.wrapper.step(obs_t)             # (1,2)
-            pi = stochastic_action_decoder(out_state)        # PolicyOut
-            a, logp = pi.action, pi.log_prob                 # (1,1), (1,1)
+            # actor forward
+            out_act = self.actor.step(obs_t)             # (1,2)
+            mean, log_std = policy_params_from_outstate(out_act)
+            a = tanh_gaussian_sample(mean, log_std)      # (1,1)
+            logp = tanh_gaussian_logp(mean, log_std, a)  # (1,1)
 
-            # critic value (shared TWC: reuse same out_state)
-            v = self.value_head(out_state)                   # (1,1)
-            
-            # env step
-            act_np = a.squeeze(0).detach().cpu().numpy()
+            # critic forward
+            out_crit = self.critic.step(obs_t)           # (1,2)
+            v = self.value_head(out_crit)                # (1,1)
+
+            act_np = a.squeeze(0).cpu().numpy()
             next_obs, reward, terminated, truncated, _ = self.env.step(act_np)
             done = terminated or truncated
 
-            # store (detached)
-            buf.add(obs_t.detach(), a.squeeze(0).detach(), logp.squeeze(0).detach(), reward, done, v.squeeze(0).detach())
-
+            buf.add(obs_t, a.squeeze(0), logp.squeeze(0), reward, done, v.squeeze(0))
             obs = next_obs
+
             if done:
                 obs, _ = self.env.reset()
-                self.wrapper.reset()
+                self.actor.reset(); self.critic.reset()
 
-        # bootstrap
-        last_out = self.wrapper.step(torch.as_tensor(obs, dtype=torch.float32, device=self.device).unsqueeze(0))
+        # bootstrap from critic
+        last_out = self.critic.step(torch.as_tensor(obs, dtype=torch.float32, device=self.device).unsqueeze(0))
         last_value = self.value_head(last_out)  # (1,1)
 
         adv, ret = compute_gae(buf.rew, buf.val, buf.done, last_value, self.cfg.gamma, self.cfg.gae_lambda)
 
-        batch = {
-            "obs": buf.obs, 
-            "actions": buf.actions, 
+        return {
+            "obs": buf.obs,
+            "actions": buf.actions,
             "old_logp": buf.logp,
-            "advantages": adv, 
-            "returns": ret
+            "advantages": adv,
+            "returns": ret,
         }
 
-        return batch
-
-    
     def update(self, batch):
         T = batch["obs"].shape[0]
         idx = torch.randperm(T, device=self.device)
         mb = self.cfg.minibatch_size
 
-        for _ in range(self.cfg.update_epochs):
+        for epoch in range(self.cfg.update_epochs):
+            approx_kl_epoch = []
             for s in range(0, T, mb):
                 ids = idx[s:s+mb]
                 mb_obs  = batch["obs"][ids]
@@ -224,42 +238,49 @@ class TwcPPOAgent:
                 mb_adv  = batch["advantages"][ids]
                 mb_ret  = batch["returns"][ids]
 
-                # recompute with current policy/value
-                # (Important: one fresh forward; single backward later)
-                self.wrapper.reset()
-                # self.wrapper.detach()
+                # fresh states per minibatch
+                self.actor.reset()
+                self.critic.reset()
 
-                out_state = self.wrapper.step(mb_obs)                # (B,2)
-                new_logp  = action_log_prob_from_outstate(out_state, mb_act)  # (B,1)
-                v         = self.value_head(out_state)               # (B,1)
-
+                out_act = self.actor.step(mb_obs)                     # (B,2)
+                mean, log_std = policy_params_from_outstate(out_act)
+                new_logp = tanh_gaussian_logp(mean, log_std, mb_act)  # (B,1)
                 ratio = (new_logp - mb_oldp).exp()
-                pg_loss = torch.max(-mb_adv * ratio,
-                                    -mb_adv * torch.clamp(ratio, 1 - self.cfg.clip_coef, 1 + self.cfg.clip_coef)
-                                   ).mean()
-                v_loss  = 0.5 * (v - mb_ret).pow(2).mean()
-                loss = pg_loss + self.cfg.vf_coef * v_loss  # + self.cfg.ent_coef * entropy.mean() if you log entropy
 
-                # --- DIAGNOSTICS ---
-                with torch.no_grad():
-                    approx_kl = (mb_oldp - new_logp).mean().abs().item()
-                    clip_frac = ( (ratio < 1 - self.cfg.clip_coef) | (ratio > 1 + self.cfg.clip_coef) ).float().mean().item()
-                    # check any actor param has nonzero grad after backward
-                # -------------------
+                pg1 =  ratio * mb_adv
+                pg2 =  torch.clamp(ratio, 1 - self.cfg.clip_coef, 1 + self.cfg.clip_coef) * mb_adv
+                policy_loss = -torch.min(pg1, pg2).mean()
+
+                # critic
+                out_crit = self.critic.step(mb_obs)
+                v_pred = self.value_head(out_crit)
+                # clipped value loss like PPO2
+                v_clipped = (batch["val"][ids] if "val" in batch else v_pred.detach()) + (v_pred - (batch["val"][ids] if "val" in batch else v_pred.detach())).clamp(-self.vf_clip_coef, self.vf_clip_coef)
+                v_loss = 0.5 * torch.max((v_pred - mb_ret)**2, (v_clipped - mb_ret)**2).mean()
+
+                # entropy bonus (use pre-squash Gaussian entropy as proxy)
+                ent = (0.5 * (1.0 + math.log(2*math.pi)) + log_std).mean()
+
+                loss = policy_loss + self.cfg.vf_coef * v_loss - self.ent_coef * ent
+
                 self.optimizer.zero_grad(set_to_none=True)
                 loss.backward()
-                nn.utils.clip_grad_norm_(self.wrapper.net.parameters(), self.cfg.max_grad_norm)
+                nn.utils.clip_grad_norm_(self.actor.net.parameters(), self.cfg.max_grad_norm)
+                nn.utils.clip_grad_norm_(self.critic.net.parameters(), self.cfg.max_grad_norm)
                 nn.utils.clip_grad_norm_(self.value_head.parameters(), self.cfg.max_grad_norm)
-                
-                actor_params  = list(self.wrapper.net.parameters())
-                critic_params = list(self.value_head.parameters())
-                gn_actor  = torch.nn.utils.clip_grad_norm_(actor_params,  self.cfg.max_grad_norm).item()
-                gn_critic = torch.nn.utils.clip_grad_norm_(critic_params, self.cfg.max_grad_norm).item()
-
-                
                 self.optimizer.step()
-                print(f"pg={pg_loss.item():.3f} v={v_loss.item():.3f} kl≈{approx_kl:.4f} clip={clip_frac:.2f} "
-                         f"| ||grad||_actor={gn_actor:.3e} ||grad||_critic={gn_critic:.3e}")
+
+                with torch.no_grad():
+                    approx_kl = (mb_oldp - new_logp).mean().abs().item()
+                    clip_frac = ((ratio - 1.0).abs() > self.cfg.clip_coef).float().mean().item()
+                    approx_kl_epoch.append(approx_kl)
+                    print(f"pg={policy_loss.item():.3f} v={v_loss.item():.3f} kl≈{approx_kl:.4f} clip={clip_frac:.2f}")
+
+            # KL early stop per epoch
+            if np.mean(approx_kl_epoch) > 1.5 * self.target_kl:
+                print(f"Early stop: KL {np.mean(approx_kl_epoch):.4f} > {1.5*self.target_kl:.4f}")
+                break
+
 
     def train(self):
         # derive number of updates from total_timesteps and rollout_steps

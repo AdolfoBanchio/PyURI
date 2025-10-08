@@ -128,5 +128,4 @@ def build_twc() -> nn.Module:
             self.in_layer.detach()
             self.hid_layer.detach()
             self.out_layer.detach()
-            
     return TWC()
