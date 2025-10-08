@@ -124,17 +124,17 @@ def build_tw_edges(
 
         if init == "kaiming_uniform":
             # bound = gain * sqrt(6 / fan_in)
-            bound = (gain * (6.0 / fan_in).sqrt()).to(dtype)
+            bound = (gain * (6.0 / fan_in).sqrt()).to(device=device,dtype=dtype)
             # sample in [-bound, +bound] per edge
             w.uniform_(-1.0, 1.0).mul_(bound)
         elif init == "xavier_uniform":
             # bound = gain * sqrt(6 / (fan_in + fan_out))
             denom = (fan_in + fan_out).clamp(min=1.0)
-            bound = (gain * (6.0 / denom).sqrt()).to(dtype)
+            bound = (gain * (6.0 / denom).sqrt()).to(device=device,dtype=dtype)
             w.uniform_(-1.0, 1.0).mul_(bound)
         elif init == "normal":
             # std = gain / sqrt(fan_in)
-            std = (gain / fan_in.sqrt()).to(dtype)
+            std = (gain / fan_in.sqrt()).to(device=device,dtype=dtype)
             # draw N(0,1) then scale per-edge
             w.normal_(0.0, 1.0).mul_(std)
         elif init == "constant":
