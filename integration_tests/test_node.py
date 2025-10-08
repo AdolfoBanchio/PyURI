@@ -20,14 +20,14 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')
 
 import torch
 from typing import Optional, Iterable, Union
-from FIURI_node import FIURI_node
+from PyURI_module import FIURIModule
 import matplotlib.pyplot as plt
 
 
 time_steps = 50
 
 # Create FIURI node
-fiuri = FIURI_node(
+fiuri = FIURIModule(
     num_cells=1,
     initial_in_state=0.0,
     initial_out_state=0.0,
@@ -37,7 +37,6 @@ fiuri = FIURI_node(
     learn_decay=False,
     clamp_min=-10.0,
     clamp_max=10.0,
-    sum_input=True
 )
 
 
@@ -49,7 +48,6 @@ influence_trace = torch.zeros(time_steps, dtype=torch.float32)
 # Run simulation
 print("Running simulation...")
 
-fiuri.set_batch_size(1)
 for t in range(time_steps):
     print(f"==== Time step {t} ====")
 
@@ -70,13 +68,21 @@ for t in range(time_steps):
         exc_current=0.0
         gj_current=0.0
 
-    # create tensor with dimentions (batch, n, 3)
-    # here, batch: one sample, n=1 one neuron
-    currents = torch.tensor([[[exc_current, inh_current, gj_current]]], dtype=torch.float32)
-
-    # Step FIURI node
-    stimulus = fiuri.forward(currents)
-    influence_trace[t] = stimulus.item()
+    # Prepare inputs for FIURIModule.forward
+    # Shapes: (B=1, n=1)
+    ex_raw = torch.tensor([[exc_current]], dtype=torch.float32)
+    in_raw = torch.tensor([[inh_current]], dtype=torch.float32)
+    # No GJ edges in this simple test
+    gj_bundle = (
+        torch.tensor([0], dtype=torch.long),
+        torch.tensor([0], dtype=torch.long),
+        torch.tensor([1], dtype=torch.float32),
+    )
+    # Presyn outputs for GJ sign (not used here but required by API)
+    o_pre = torch.full((1, 1), fill_value=gj_current,dtype=torch.float32)
+    # Step FIURI module
+    out = fiuri.forward(ex_raw, in_raw, gj_bundle, o_pre)
+    influence_trace[t] = out.item()
 
     output_state = fiuri.out_state.item()
     internal_state = fiuri.in_state.item()

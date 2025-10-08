@@ -9,7 +9,7 @@ import torch
 import torch.nn as nn
 import torch.optim as optim
 
-from utils.twc_builder import build_TWC
+from utils.twc_builder import build_twc
 from utils.twc_io_wrapper import TwcIOWrapper, mountaincar_pair_encoder, stochastic_action_decoder
 
 # ============= HELPER FUNCTIONS/CLASSES ===============
@@ -116,15 +116,17 @@ class PPOConfig:
     max_grad_norm: float = 0.5
     lr: float = 3e-4
     seed: int = 0
-    device: str = "cpu"
+    device: str = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 
 class ValueHead(nn.Module):
-    def __init__(self, in_dim: int = 2):
+    def __init__(self, twc: nn.Module,in_dim: int = 2):
         super().__init__()
+        self.twc = twc
         self.v = nn.Linear(in_dim, 1)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
+        
         return self.v(x)
 
 
@@ -145,14 +147,15 @@ class TwcPPOAgent:
         self.obs_space = self.env.observation_space
         self.act_space = self.env.action_space
 
-        net = build_TWC()
+        net = build_twc()
         self.wrapper = TwcIOWrapper(
             net=net,
+            device=cfg.device,
             obs_encoder=mountaincar_pair_encoder(),   
             action_decoder=stochastic_action_decoder  # used only during rollout
         )
 
-        self.value_head = ValueHead(in_dim=2).to(cfg.device)
+        self.value_head = ValueHead(twc=build_twc(),in_dim=2).to(cfg.device)
 
         params = list(self.wrapper.net.parameters()) + list(self.value_head.parameters())
         self.optimizer = optim.Adam(params, lr=cfg.lr)
@@ -223,6 +226,9 @@ class TwcPPOAgent:
 
                 # recompute with current policy/value
                 # (Important: one fresh forward; single backward later)
+                self.wrapper.reset()
+                # self.wrapper.detach()
+
                 out_state = self.wrapper.step(mb_obs)                # (B,2)
                 new_logp  = action_log_prob_from_outstate(out_state, mb_act)  # (B,1)
                 v         = self.value_head(out_state)               # (B,1)
@@ -234,11 +240,26 @@ class TwcPPOAgent:
                 v_loss  = 0.5 * (v - mb_ret).pow(2).mean()
                 loss = pg_loss + self.cfg.vf_coef * v_loss  # + self.cfg.ent_coef * entropy.mean() if you log entropy
 
+                # --- DIAGNOSTICS ---
+                with torch.no_grad():
+                    approx_kl = (mb_oldp - new_logp).mean().abs().item()
+                    clip_frac = ( (ratio < 1 - self.cfg.clip_coef) | (ratio > 1 + self.cfg.clip_coef) ).float().mean().item()
+                    # check any actor param has nonzero grad after backward
+                # -------------------
                 self.optimizer.zero_grad(set_to_none=True)
-                loss.backward(retain_graph=True)
+                loss.backward()
                 nn.utils.clip_grad_norm_(self.wrapper.net.parameters(), self.cfg.max_grad_norm)
                 nn.utils.clip_grad_norm_(self.value_head.parameters(), self.cfg.max_grad_norm)
+                
+                actor_params  = list(self.wrapper.net.parameters())
+                critic_params = list(self.value_head.parameters())
+                gn_actor  = torch.nn.utils.clip_grad_norm_(actor_params,  self.cfg.max_grad_norm).item()
+                gn_critic = torch.nn.utils.clip_grad_norm_(critic_params, self.cfg.max_grad_norm).item()
+
+                
                 self.optimizer.step()
+                print(f"pg={pg_loss.item():.3f} v={v_loss.item():.3f} kl≈{approx_kl:.4f} clip={clip_frac:.2f} "
+                         f"| ||grad||_actor={gn_actor:.3e} ||grad||_critic={gn_critic:.3e}")
 
     def train(self):
         # derive number of updates from total_timesteps and rollout_steps

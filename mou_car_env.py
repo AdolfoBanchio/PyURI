@@ -1,18 +1,19 @@
 import gymnasium as gym
-from utils.twc_builder import build_TWC
+from utils.twc_builder import build_twc
 from utils.twc_io_wrapper import TwcIOWrapper, mountaincar_pair_encoder
 from FIURI_node import FIURI_node
-from bindsnet.analysis.visualization import summary
 import torch
 import torch.nn as nn
 
+dev = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+net = build_twc()
 
-net = build_TWC()
 mc_wrapper = TwcIOWrapper(
     net=net,
+    device=dev,
     obs_encoder=mountaincar_pair_encoder(),
 )
-print(summary(mc_wrapper.net))
+print(mc_wrapper.net)
 
 env = gym.make("MountainCarContinuous-v0", render_mode="human")  # default goal_velocity=0
 obs, info = env.reset(seed=123)
@@ -23,7 +24,7 @@ episode_over = False
 total_reward = 0
 episode = 0
 
-for _ in range(1):
+while not episode_over:
     print(f"== episode {episode} ==")
 
     out_s = mc_wrapper.step(obs)
@@ -38,13 +39,4 @@ for _ in range(1):
     episode +=1
 
 print(f"episode over, total reward: {total_reward}")
-    
-# Print inner (in_state) and out (out_state) state for all TWC neurons
-for layer_name, layer in mc_wrapper.net.layers.items():
-    if isinstance(layer, FIURI_node):
-        in_s = layer.in_state.unsqueeze(0)
-        out_s = layer.out_state.unsqueeze(0)
-        print(f"Layer {layer_name} in_state: {in_s}")
-        print(f"Layer {layer_name} in_state grad: {in_s.grad}")
-        print(f"Layer {layer_name} out_state: {out_s}")
-        print(f"Layer {layer_name} out_state grad: {out_s.grad}")
+

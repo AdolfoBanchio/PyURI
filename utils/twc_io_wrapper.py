@@ -3,10 +3,7 @@ from dataclasses import dataclass
 from typing import Callable, Optional, Tuple, List
 from typing import NamedTuple
 import torch
-import numpy as np
-from bindsnet.network import Network
-from bindsnet.network.nodes import Input
-from bindsnet.network.topology import Connection
+from torch.nn import Module
 
 
 @dataclass
@@ -27,14 +24,14 @@ def default_obs_encoder(
 ) -> torch.Tensor:
     """
     Encode MountainCarContinuous observation [position, velocity]
-    into currents for the TWC input layer with 3 channels per neuron (EX, IN, GJ).
+    into the internal and output states of the sensory neurons of TWC
 
     Strategy: compute a scalar s_j per input neuron from a linear mix of
     normalized (pos, vel); route positive part to EX, negative part to IN;
     keep GJ at 0 for external drive.
 
     obs: (batch, 2)
-    returns: (batch, n_inputs, 3)
+    returns: (batch, 2, n_inputs)
     """
     assert obs.ndim == 2 and obs.shape[1] == 2, "obs must be (batch, 2)"
 
@@ -99,69 +96,21 @@ class TwcIOWrapper:
 
     def __init__(
         self,
-        net: Network,
+        net: Module,
+        device,
         *,
-        sensory_layer_name: str = "input",
-        output_layer_name: str = "output",
         obs_encoder: Optional[Callable[[torch.Tensor, int, torch.device], torch.Tensor]] = None,
         action_decoder: Optional[Callable[[torch.Tensor], torch.Tensor]] = None,
     ) -> None:
+        self.device = device
+        self.dtype = torch.float32
         self.net = net
-        self.sensory_layer_name = sensory_layer_name
-        self.output_layer_name = output_layer_name
-        self.input_name = sensory_layer_name
+        self.n_inputs = 4
+        net.to(device=device)
 
         self.obs_encoder = obs_encoder
         self.action_decoder = action_decoder
 
-
-        self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-        self.dtype = torch.float32
-
-        # TWC input/output layers
-        assert self.sensory_layer_name in net.layers, f"Missing layer '{self.sensory_layer_name}' in TWC net"
-        assert self.output_layer_name in net.layers, f"Missing layer '{self.output_layer_name}' in TWC net"
-
-        self.twc_in = net.layers[self.sensory_layer_name]
-        self.twc_out = net.layers[self.output_layer_name]
-
-        # Build sensory input layer and identity connection (channel-wise)
-        n_inputs = self.twc_in.shape[0]
-        assert self.twc_in.shape[1] == 3, "TWC input layer must have 3 channels"
-        
-        self.net.to(self.device)
-        # Debug: print device of relevant torch tensors in the network
-        try:
-            # Print devices per submodule (layers, connections) considering only local params/buffers
-            for mod_name, mod in self.net.named_modules():
-                local_devs = []
-                for _, p in mod.named_parameters(recurse=False):
-                    d = str(p.device)
-                    if d not in local_devs:
-                        local_devs.append(d)
-                for _, b in mod.named_buffers(recurse=False):
-                    d = str(b.device)
-                    if d not in local_devs:
-                        local_devs.append(d)
-                if local_devs:
-                    label = mod_name if mod_name else 'Network'
-                    print(f"[Device] {label}: {', '.join(local_devs)}")
-            # Fallback if nothing was found; still show chosen device
-            has_any = any(True for _ in self.net.parameters()) or any(True for _ in self.net.buffers())
-            if not has_any:
-                print(f"[Device] Network default: {self.device}")
-        except Exception:
-            # Non-fatal: ensure init proceeds even if inspection fails
-            print(f"[Device] Network (fallback): {self.device}")
-        
-        print('--- children ---')
-        for n, m in net.named_children():
-            print('child:', n, type(m))
-        print('--- params ---')
-        for n, p in net.named_parameters():
-            print('param:', n, p.device)
-        # Cache sizes
-        self.n_inputs = n_inputs
 
     def _standardize_obs(self, obs) -> torch.Tensor:
         """
@@ -174,7 +123,7 @@ class TwcIOWrapper:
         else:
             o = torch.as_tensor(obs)
 
-        o = o.to(self.device, dtype=self.dtype)
+        o = o.to(self.device)
         o = o.squeeze()
 
         if o.ndim == 1:
@@ -192,12 +141,20 @@ class TwcIOWrapper:
         return o
 
     def encode_obs(self, obs: torch.Tensor) -> torch.Tensor:
+        """  
+            Given an observation of a enviroments 
+            encodes to a correct input representation to TWC
+        """
         if self.obs_encoder is None:
             return default_obs_encoder(obs.to(self.device, dtype=self.dtype), n_inputs=self.n_inputs, device=self.device)
         # Backward-compat with simple callables expecting (obs, n_inputs, device)
         return self.obs_encoder(obs.to(self.device, dtype=self.dtype), self.n_inputs, self.device)
 
     def decode_action(self, out_state: torch.Tensor) -> torch.Tensor:
+        """  
+            Given an output state of the TWC decodes the corresponding action
+            to a enviroment.
+        """
         if self.action_decoder is None:
             return default_action_decoder(out_state)
         return self.action_decoder(out_state)
@@ -216,23 +173,15 @@ class TwcIOWrapper:
         x = self.encode_obs(obs_std)  # (B, n_inputs, 3)
         B = x.shape[0]
 
-        # Prepare time-major input for BindsNET: (T=1, B, ...)
-        X = x.unsqueeze(0)
-
-        # Make sure batch sizes are correct
-        #self.input.set_batch_size(B)
-        self.twc_in.set_batch_size(B)
-        self.twc_out.set_batch_size(B)
-
-        self.net.run(inputs={self.input_name: X}, time=1, one_step=True)
-
-        # Read out_state from output layer (batch, n_out)
-        out_state = self.twc_out.out_state
+        out_state = self.net.forward(x)
         return out_state
 
     def reset(self) -> None:
         """Reset internal states across TWC layers (call at episode boundaries)."""
         self.net.reset_state_variables()
+
+    def detach(self) -> None:
+        self.net.detach()
 
 
 # -------- Pairwise IN encoder (positive/negative neuron per variable) --------
@@ -267,39 +216,43 @@ def make_pairwise_in_encoder(
     def encoder(obs: torch.Tensor, n_inputs: int, device: torch.device) -> torch.Tensor:
         assert obs.ndim == 2, "obs must be (batch, D)"
         B = obs.shape[0]
-        x = torch.zeros(B, n_inputs, 3, dtype=obs.dtype, device=obs.device)
+        x = torch.zeros(B, 2, n_inputs, dtype=obs.dtype, device=obs.device)
 
         for p in pairs:
             v = obs[:, p.obs_index]
-            
+
             mask_pos = v >= p.valleyVal
             mask_neg = ~mask_pos
             rng = (p.maxState - p.minState)
 
-            
+
             # Active side uses EX channel; inactive gets zero (or minState if enabled)
             if mask_pos.any():
                 cor = v[mask_pos] / p.maxVal
                 pot = rng * cor + p.minState
                 if clamp_to_state_range:
                     pot = pot.clamp(min=p.minState, max=p.maxState)
-                
-                x[mask_pos, p.positive_index, 0] = pot
+
+                x[mask_pos, 0,p.positive_index] = pot
+                x[mask_pos, 1,p.positive_index] = pot
 
                 if set_inactive_to_min_state:
-                    x[mask_pos, p.negative_index, 0] = p.minState
-            
+                    x[mask_pos,0, p.negative_index] = p.minState
+                    x[mask_pos,1, p.negative_index] = p.minState
+
             if mask_neg.any():
                 cor = v[mask_neg] / (-p.minVal)
                 pot = rng * (-cor) + p.minState
                 if clamp_to_state_range:
                     pot = pot.clamp(min=p.minState, max=p.maxState)
-                
-                x[mask_neg, p.negative_index, 0] = pot
+
+                x[mask_neg, 0, p.negative_index] = pot
+                x[mask_neg, 1, p.negative_index] = pot
 
                 if set_inactive_to_min_state:
-                    x[mask_neg, p.positive_index, 0] = p.minState
-            
+                    x[mask_neg, 0, p.positive_index] = p.minState
+                    x[mask_neg, 1, p.positive_index] = p.minState
+
         return x
 
     return encoder
