@@ -99,7 +99,13 @@ class FIURIModule(nn.Module):
         self.clamp_min = clamp_min
         self.clamp_max = clamp_max
 
+    # Functions to use Thr and decay as positive values during evaluation and training
+    def thr_pos(self):
+        return F.softplus(self.threshold)
     
+    def dec_pos(self):
+        return F.softplus(self.decay)
+
     def _ensure_state(self, B: int, device, dtype):
         if self.in_state.ndim != 2 or self.in_state.shape != (B, self.num_cells):
             self.in_state  = torch.full((B, self.num_cells), self._init_E, device=device, dtype=dtype)
@@ -145,8 +151,8 @@ class FIURIModule(nn.Module):
             S = self.in_state
 
         # Make sure params are on the same device/dtype as S
-        T = self.threshold.view(1, -1).to(device=S.device, dtype=S.dtype)
-        d = self.decay.view(1, -1).to(device=S.device, dtype=S.dtype)
+        T = self.thr_pos().view(1, -1)
+        d = self.dec_pos().view(1, -1)
 
         eps_abs = 1e-8
         eps_rel = 1e-6
@@ -343,7 +349,7 @@ class FiuriSparseConn(nn.Module):
         if self.ex_idx.numel() > 0:
             src, dst = self.ex_idx[0], self.ex_idx[1]   # (E_ex,)
             Oj = o_pre[:, src]                          # (B, E_ex)
-            contrib = Oj * self.ex_w.abs()                    # (B, E_ex)
+            contrib = Oj * self.ex_w                    # (B, E_ex)
             ex_raw.zero_()
             _scatter_add_batched(contrib, dst, ex_raw)
 
@@ -351,7 +357,7 @@ class FiuriSparseConn(nn.Module):
         if self.in_idx.numel() > 0:
             src, dst = self.in_idx[0], self.in_idx[1]    # (E_in,)
             Oj = o_pre[:, src]                           # (B, E_in)
-            contrib = Oj * self.in_w.abs()                     # (B, E_in)
+            contrib = Oj * self.in_w                     # (B, E_in)
             in_raw.zero_()
             _scatter_add_batched(contrib, dst, in_raw)
 

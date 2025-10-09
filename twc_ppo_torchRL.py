@@ -1,4 +1,6 @@
 from collections import defaultdict
+import csv
+from datetime import datetime
 import matplotlib.pyplot as plt
 import torch
 from tensordict.nn import TensorDictModule
@@ -22,6 +24,7 @@ from torchrl.modules import ProbabilisticActor, TanhNormal, ValueOperator
 from torchrl.objectives import ClipPPOLoss
 from torchrl.objectives.value import GAE
 from tqdm import tqdm
+from torch.utils.tensorboard import SummaryWriter
 from utils.twc_builder import build_twc
 from utils.twc_io_wrapper import mountaincar_pair_encoder
 
@@ -137,6 +140,10 @@ scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
 )
 
 logs = defaultdict(list)
+# TensorBoard writer (timestamped run directory)
+run_name = f"twc_ppo_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+writer = SummaryWriter(log_dir=f"runs/{run_name}")
+
 pbar = tqdm(total=total_frames)
 eval_str = ""
 
@@ -174,15 +181,22 @@ for i, tensordict_data in enumerate(collector):
             # Also detach recurrent states after each update to avoid stale graphs
             optim.zero_grad()
 
-    logs["reward"].append(tensordict_data["next", "reward"].mean().item())
-    pbar.update(tensordict_data.numel())
-    cum_reward_str = (
-        f"average reward={logs['reward'][-1]: 4.4f} (init={logs['reward'][0]: 4.4f})"
-    )
+    # Basic metrics per batch
+    batch_avg_rew = tensordict_data["next", "reward"].mean().item()
+    logs["reward"].append(batch_avg_rew)
     logs["step_count"].append(tensordict_data["step_count"].max().item())
-    stepcount_str = f"step count (max): {logs['step_count'][-1]}"
     logs["lr"].append(optim.param_groups[0]["lr"])
-    lr_str = f"lr policy: {logs['lr'][-1]: 4.4f}"
+
+    # TensorBoard logging (use global steps as frames seen)
+    global_steps = pbar.n + tensordict_data.numel()
+    writer.add_scalar("train/avg_reward", batch_avg_rew, global_steps)
+    writer.add_scalar("train/step_count_max", logs["step_count"][-1], global_steps)
+    writer.add_scalar("train/lr", logs["lr"][-1], global_steps)
+
+    # Progress bar update and concise status
+    pbar.update(tensordict_data.numel())
+    cum_reward_str = f"avg_rew={logs['reward'][-1]:.3f}"
+    lr_str = f"lr={logs['lr'][-1]:.2e}"
     if i % 10 == 0:
         # We evaluate the policy once every 10 batches of data.
         # Evaluation is rather simple: execute the policy without exploration
@@ -198,15 +212,50 @@ for i, tensordict_data in enumerate(collector):
                 eval_rollout["next", "reward"].sum().item()
             )
             logs["eval step_count"].append(eval_rollout["step_count"].max().item())
-            eval_str = (
-                f"eval cumulative reward: {logs['eval reward (sum)'][-1]: 4.4f}"
-                f"(init: {logs['eval reward (sum)'][0]: 4.4f}), "
-                f"eval step-count: {logs['eval step_count'][-1]}"
-            )
+            # TensorBoard eval
+            writer.add_scalar("eval/reward_mean", logs["eval reward"][-1], pbar.n)
+            writer.add_scalar("eval/reward_sum", logs["eval reward (sum)"][-1], pbar.n)
+            writer.add_scalar("eval/step_count_max", logs["eval step_count"][-1], pbar.n)
+            eval_str = f"eval_sum={logs['eval reward (sum)'][-1]:.3f}"
             del eval_rollout
-    pbar.set_description(", ".join([eval_str, cum_reward_str, stepcount_str, lr_str]))
+    # Minimal pbar description
+    pbar.set_description(", ".join([s for s in [eval_str, cum_reward_str, lr_str] if s]))
 
     # We're also using a learning rate scheduler. Like the gradient clipping,
     # this is a nice-to-have but nothing necessary for PPO to work.
     scheduler.step()
+
+# Close writer and export CSV logs
+pbar.close()
+writer.flush(); writer.close()
+
+csv_path = f"logs_{run_name}.csv"
+with open(csv_path, "w", newline="") as f:
+    w = csv.writer(f)
+    # header
+    header = [
+        "idx",
+        "train_avg_reward",
+        "train_step_count_max",
+        "lr",
+        "eval_reward_mean",
+        "eval_reward_sum",
+        "eval_step_count_max",
+    ]
+    w.writerow(header)
+    # rows (pad shorter eval lists with NaN)
+    N = len(logs["reward"])
+    for idx in range(N):
+        row = [
+            idx,
+            logs["reward"][idx] if idx < len(logs["reward"]) else float("nan"),
+            logs["step_count"][idx] if idx < len(logs["step_count"]) else float("nan"),
+            logs["lr"][idx] if idx < len(logs["lr"]) else float("nan"),
+            logs["eval reward"][idx] if idx < len(logs.get("eval reward", [])) else float("nan"),
+            logs["eval reward (sum)"][idx] if idx < len(logs.get("eval reward (sum)", [])) else float("nan"),
+            logs["eval step_count"][idx] if idx < len(logs.get("eval step_count", [])) else float("nan"),
+        ]
+        w.writerow(row)
+
+print(f"TensorBoard logs: runs/{run_name} | CSV: {csv_path}")
 
