@@ -2,8 +2,8 @@ import json
 import os
 import torch
 from torch import nn
-from utils.w_builder import build_tw_edges
-from PyURI_module import FIURIModule, FiuriSparseConn
+from utils.w_builder import build_tw_matrices
+from PyURI_module import FIURIModule, FiuriDenseConn, FiuriSparseGJConn
 from typing import Callable
 json_path = os.path.join(os.path.dirname(__file__),"TWC_fiu.json")
 
@@ -23,40 +23,6 @@ def create_layer(n_neurons) -> FIURIModule:
         clamp_max=10.0,
     )
 
-def make_sparse_modules_from_tw_edges(edges_dict, device=None):
-    """
-    Builds three FiuriUnsignSparseConn modules from build_tw_edges() output.
-    Returns (in2hid, hid, hid2out).
-    """
-    sizes = edges_dict["sizes"]
-    n_in, n_hid, n_out = sizes["n_in"], sizes["n_hid"], sizes["n_out"]
-
-    def mk(block, n_pre, n_post):
-        ex = edges_dict[block]["EX"]
-        in_ = edges_dict[block]["IN"]
-        gj = edges_dict[block]["GJ"]
-        mod = FiuriSparseConn(n_pre, n_post,
-                                    torch.stack([ex["src"], ex["dst"]], dim=0),
-                                    torch.stack([in_["src"], in_["dst"]], dim=0),
-                                    torch.stack([gj["src"], gj["dst"]], dim=0))
-        # Overwrite initial random weights with our initialized vectors
-        if ex["w"].numel():
-            mod.ex_w.data.copy_(ex["w"].to(device))
-            mod.ex_w.data.mul_(2.0)
-        if in_["w"].numel():
-            mod.in_w.data.copy_(in_["w"].to(device))
-            mod.in_w.data.mul_(0.2)
-        if gj["w"].numel():
-            mod.gj_w.data.copy_(gj["w"].to(device))
-        if device is not None:
-            mod.to(device)
-        return mod
-
-    m_in2hid = mk("in2hid", n_in,  n_hid)
-    m_hid    = mk("hid",    n_hid, n_hid)
-    m_hid2out= mk("hid2out",n_hid, n_out)
-    return m_in2hid, m_hid, m_hid2out
-
 def build_twc(action_decoder: Callable,
               use_json_w: bool = False,) -> nn.Module:
     """ Extracts the data from thr TWC description
@@ -67,24 +33,26 @@ def build_twc(action_decoder: Callable,
     with open(json_path, "r") as f:
         net_data = json.load(f)
 
-    edges = build_tw_edges(
-        net_data,
-        device=dev,
-        dtype=torch.float32,
-        init="kaiming_uniform",
-        gain=1.0,
-        random_seed=42,
-        sort_by_dst=True,
-        use_json_weights=use_json_w
-    )
-    sizes = edges["sizes"]
+    masks, sizes = build_tw_matrices(net_data)
+
     n_in, n_hid, n_out = sizes["n_in"], sizes["n_hid"], sizes["n_out"]
 
-    in2hid, hid, hid2out = make_sparse_modules_from_tw_edges(edges, device=dev)
-    in_layer =  create_layer(n_in).to(dev)
-    hid_layer = create_layer(n_hid).to(dev)
-    out_layer = create_layer(n_out).to(dev)
+    in_layer =  create_layer(n_in)
+    hid_layer = create_layer(n_hid)
+    out_layer = create_layer(n_out)
 
+    in2hid = FiuriDenseConn(n_pre=n_in, n_post=n_hid,w_mask=masks["in2hid"]["IN"], type="IN")
+    hid_IN = FiuriDenseConn(n_pre=n_hid, n_post=n_hid, w_mask=masks["hid"]["IN"], type="IN")
+    hid_EX = FiuriDenseConn(n_pre=n_hid, n_post=n_hid, w_mask=masks["hid"]["EX"], type="EX")
+    hid2out_EX = FiuriDenseConn(n_pre=n_hid, n_post=n_out, w_mask=masks["hid2out"]["EX"], type="EX")
+
+    # create the only GJ sparse conn
+    # PLM -> PVC, AVM -> AVD
+    gj_edges = torch.tensor([[1, 2],   # src (PLM=1, AVM=2)
+                             [2, 1]])  # dst (PVC=2, AVD=1)
+    gj_conn = FiuriSparseGJConn(n_pre=n_in, n_post=n_hid, gj_edges=gj_edges)
+
+    
     class TWC (nn.Module):
         """  
         When creating the module a proper input decoder to the 4 sensory neurons must be provided
@@ -94,12 +62,21 @@ def build_twc(action_decoder: Callable,
         """
         def __init__(self, *args, **kwargs):
             super().__init__(*args, **kwargs)
+            # neuron layers
             self.in_layer = in_layer
             self.hid_layer = hid_layer
             self.out_layer = out_layer
-            self.in2hid = in2hid
-            self.hid2hid = hid
-            self.hid2out = hid2out
+
+            # connections
+            self.in2hid_IN = in2hid
+            self.in2hid_GJ = gj_conn
+
+            self.hid_IN = hid_IN
+            self.hid_EX = hid_EX
+
+            self.hid2out = hid2out_EX
+
+            # I/O
             self.decoder = action_decoder
 
         def forward(self, x: torch.Tensor) -> torch.Tensor:
@@ -137,23 +114,23 @@ def build_twc(action_decoder: Callable,
                 raise ValueError(f"Encoded input has incompatible shape {tuple(z.shape)} for n_in={self.in_layer.num_cells}")
 
             B = ex_in.size(0)
-            # Empty GJ bundle (no sensory gap junction graph)
-            empty = torch.zeros(0, dtype=torch.long, device=device)
-            gj_bundle = (empty, empty, torch.zeros(0, dtype=ex_in.dtype, device=device))
-            o_pre_zero = torch.zeros(B, self.in_layer.num_cells, dtype=ex_in.dtype, device=device)
-            _ = self.in_layer(ex_in, in_in, gj_bundle, o_pre_zero)
+            
+            in_o = self.in_layer(ex_in - in_in)
 
             # input -> hidden
-            ex_raw, in_raw, gj_bundle = self.in2hid(self.in_layer.out_state)
-            h = self.hid_layer(ex_raw, in_raw, gj_bundle, self.in_layer.out_state)
+            in_influence = self.in2hid_IN(in_o)
+            in_gj_bundle = self.in2hid_GJ(in_o)
+
+            h_o = self.hid_layer(in_influence, gj_bundle=in_gj_bundle, o_pre=in_o)
 
             # hidden -> hidden (one recurrent step)
-            ex_h, in_h, gj_h = self.hid2hid(h)
-            h = self.hid_layer(ex_h, in_h, gj_h, self.hid_layer.out_state)
+            ex_h = self.hid_EX(h_o)                      # (B, n_hid)
+            in_h = self.hid_IN(h_o)                      # (B, n_hid)
+            h_o_2 = self.hid_layer(ex_h + in_h)          # chem_influence only
 
-            # hidden -> output
-            ex_o, in_o, gj_o = self.hid2out(h)
-            y = self.out_layer(ex_o, in_o, gj_o, self.hid_layer.out_state)  # presyn = hidden O
+            # --- hidden -> output (EX only)
+            ex_o = self.hid2out(h_o_2)                   # (B, n_out)
+            y = self.out_layer(ex_o)                     # output layer step
 
             return y
         
@@ -165,7 +142,7 @@ def build_twc(action_decoder: Callable,
             self.hid_layer.reset_state() 
             self.out_layer.reset_state() 
         
-        def detach(self):
+        def _detach(self):
             self.in_layer.detach()
             self.hid_layer.detach()
             self.out_layer.detach()

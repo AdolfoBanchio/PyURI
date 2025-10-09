@@ -85,10 +85,10 @@ class FIURIModule(nn.Module):
         self.decay     = nn.Parameter(d_init, requires_grad=True) if learn_decay     else d_init
 
         # --- persistent state buffers (allocated lazily with correct batch/device/dtype)
-        """
-        self.register_buffer("in_state", torch.tensor(initial_in_state, dtype=torch.float32))  # E (batch, n)
-        self.register_buffer("out_state", torch.tensor(initial_out_state, dtype=torch.float32))  # O/output (batch, n) — BindsNET convention      
-        """
+        
+        #self.register_buffer("in_state", torch.tensor(initial_in_state, dtype=torch.float32))  # E (batch, n)
+        #self.register_buffer("out_state", torch.tensor(initial_out_state, dtype=torch.float32))  # O/output (batch, n) — BindsNET convention      
+        
         self.in_state = torch.tensor(initial_in_state, dtype=torch.float32)
         self.out_state = torch.tensor(initial_out_state, dtype=torch.float32)
         # defaults for initial states (scalars stored just to use at first allocation)
@@ -104,7 +104,7 @@ class FIURIModule(nn.Module):
         return F.softplus(self.threshold)
     
     def dec_pos(self):
-        return F.softplus(self.decay)
+        return torch.clamp(F.softplus(self.decay), max=0.5)
 
     def _ensure_state(self, B: int, device, dtype):
         if self.in_state.ndim != 2 or self.in_state.shape != (B, self.num_cells):
@@ -166,15 +166,16 @@ class FIURIModule(nn.Module):
         self.out_state = new_o
         self.in_state  = new_e
 
-    def forward(self, ex_raw, in_raw, gj_bundle, o_pre) -> torch.Tensor:
-        B = ex_raw.size(0)
-        self._ensure_state(B, ex_raw.device, ex_raw.dtype)
+    def forward(self, chem_influence, gj_bundle = None, o_pre = None) -> torch.Tensor:
+        B = chem_influence.size(0)
+        self._ensure_state(B, chem_influence.device, chem_influence.dtype)
         
-        chem_influence = ex_raw - in_raw                  # (B, n)
-        gj_sum         = self._compute_gj_sum(gj_bundle, o_pre)  # (B, n)
-        input_current  = chem_influence + gj_sum          # (B, n)
+        if gj_bundle is not None:
+            assert o_pre is not None, "o_pre must be provided when gj_bundle is not None"
+            gj_sum = self._compute_gj_sum(gj_bundle, o_pre)  # (B, n)
+            chem_influence  = chem_influence + gj_sum          # (B, n)
 
-        S = torch.clamp(self.in_state + input_current, self.clamp_min, self.clamp_max)
+        S = torch.clamp(self.in_state + chem_influence, self.clamp_min, self.clamp_max)
         self.neuron_step(S=S)
         return self.out_state
 
@@ -292,76 +293,69 @@ class FIURIModule(nn.Module):
 
         self.out_state = self.out_state.detach()
 
+class FiuriDenseConn(nn.Module):
+    """  
+        This class is intended to be used to connect FIURI layers with EX/IN conns
+
+        Contains a dense graph of the edges between the pre and post synaptic layers
+        and also a mask of the edges that must not be taken into account.
+
+        params:
+            - n_pre, n_post: cardinality of pre and post synaptic layers 
+            - w_mask: tensor of size pre x post setting wich weights wont be updated
+            - type: "EX" or "IN", will define the sign of the wheigt on the forward passs.
+    """
+    def __init__(self, n_pre: int, 
+                n_post: int, 
+                w_mask: torch.Tensor, # (n_pre, n_poost) shape
+                type: str):
+        super().__init__()
+        if type not in ["EX","IN"]:
+            raise ValueError("Incorrect type of Fiuri Dense Connection gieven")
+        self.type = type
+        self.n_pre, self.n_post = n_pre, n_post
+
+        self.register_buffer("w_mask", w_mask) 
+        self.w = nn.Parameter(torch.empty(n_pre, n_post))
+        nn.init.kaiming_uniform_(self.w)
+
+    def forward(self, o_pre):
+        """  
+        o_pre: (B, n_pre) presyn output at current step
+
+        Returns:
+            weighed presynaptic outputs
+        """
+        # Effective weights after masking
+        w_eff = self.w * self.w_mask  # (n_pre, n_post)
+        contrib = o_pre.matmul(w_eff)  # (B, n_post)
+        if self.type == "EX":
+            return contrib
+        else:  # "IN"
+            return -contrib
 
 
-class FiuriSparseConn(nn.Module):
+class FiuriSparseGJConn(nn.Module):
     """ 
-        This class is only to be used to connect FIURI layers in order 
-        to represent sparse connections between neurons.
+        This class is only to be used to connect FIURI layers with GJ conns
 
         Contains a sparse graph of edges between pre and post synaptic layers.
-        Used for arbitrary wiring between layers.
         The GJ sign rule is applied on each target neuron, 
             thus, out GJ values are returned by forward to the next layer to be used.
         Params:
-            - n_re, n_post: pre and post synapitc layers of the connection
-            - ex_edges: pre X post matrix containing non-zero values on the desired edges
-            - in_edges: pre X post matrix containing non-zero values on the desired edges
+            - n_pre, n_post: pre and post synapitc layers of the connection
             - gj_edges: pre X post matrix containing non-zero values on the desired edges
     """
-
-    def __init__(self,n_pre,n_post,
-                 ex_edges,in_edges,gj_edges,
-                 ex_init=0.1, in_init=0.1, gj_init=0.1):
-        """ex_edges/in_edges/gj_edges: LongTensor edge_index of shape (2, E)
-        where row 0 = src indices in [0, n_pre), row 1 = dst indices in [0, n_post)
-        """
+    def __init__(self, n_pre, n_post, gj_edges: torch.Tensor):
         super().__init__()
         self.n_pre, self.n_post = n_pre, n_post
-        # Register edge indices as buffers (not learnable)
-        self.register_buffer("ex_idx", ex_edges)   # (2, E_ex)
-        self.register_buffer("in_idx", in_edges)   # (2, E_in)
-        self.register_buffer("gj_idx", gj_edges)   # (2, E_gj)
-        # Per-edge learnable weights
-        self.ex_w = nn.Parameter(torch.empty(self.ex_idx.shape[1]).normal_(0, ex_init), requires_grad=True)
-        self.in_w = nn.Parameter(torch.empty(self.in_idx.shape[1]).normal_(0, in_init), requires_grad=True)
-        self.gj_w = nn.Parameter(torch.empty(self.gj_idx.shape[1]).normal_(0, gj_init), requires_grad=True)
+        if gj_edges.ndim != 2 or gj_edges.shape[0] != 2:
+            raise ValueError("gj_edges must be shape (2, E)")
+        self.register_buffer("gj_idx", gj_edges.long())
+        E = gj_edges.shape[1]
+        self.gj_w = nn.Parameter(torch.empty(E))
+        nn.init.normal(self.gj_w)
 
     def forward(self, o_pre):
-        """
-        o_pre: (B, n_pre) presyn output at current step.
-        Returns:
-            ex_raw: (B, n_post) ==  w_ex * O_j
-            in_raw: (B, n_post) ==  w_in * O_j
-            gj_bundle: tuple used to extract GJ sign downstream:
-                (src_gj, dst_gj, w_gj) as tensors.
-
-        summation of each channel is handled in the post synaptic layer
-        """
-        B = o_pre.size(0)
-        device = o_pre.device
-        dtype  = o_pre.dtype
-
-        ex_raw = o_pre.new_zeros(B, self.n_post)
-        in_raw = o_pre.new_zeros(B, self.n_post)
-
-        # --- EX 
-        if self.ex_idx.numel() > 0:
-            src, dst = self.ex_idx[0], self.ex_idx[1]   # (E_ex,)
-            Oj = o_pre[:, src]                          # (B, E_ex)
-            contrib = Oj * self.ex_w                    # (B, E_ex)
-            ex_raw.zero_()
-            _scatter_add_batched(contrib, dst, ex_raw)
-
-        # --- IN 
-        if self.in_idx.numel() > 0:
-            src, dst = self.in_idx[0], self.in_idx[1]    # (E_in,)
-            Oj = o_pre[:, src]                           # (B, E_in)
-            contrib = Oj * self.in_w                     # (B, E_in)
-            in_raw.zero_()
-            _scatter_add_batched(contrib, dst, in_raw)
-
-        # --- GJ bundle for exact sign in postsyn layer
-        gj_bundle = (self.gj_idx[0], self.gj_idx[1], self.gj_w)
-
-        return ex_raw, in_raw, gj_bundle
+        # Return bundle; FIURIModule applies softplus(w) and sum
+        return (self.gj_idx[0], self.gj_idx[1], self.gj_w)

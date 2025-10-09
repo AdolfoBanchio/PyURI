@@ -48,7 +48,7 @@ clip_epsilon = (
 )
 gamma = 0.99
 lmbda = 0.95
-entropy_eps = 1e-3
+entropy_eps = 2e-2  # encourage more exploration to escape plateaus
 
 base_env = GymEnv("MountainCarContinuous-v0", device=device)
 
@@ -72,6 +72,7 @@ twc_net = build_twc(action_decoder=mountaincar_pair_encoder(), use_json_w=True)
 
 actor_net = nn.Sequential(
     twc_net,
+    nn.LayerNorm(2),  # stabilize TWC outputs before param extraction
     NormalParamExtractor(),
 )
 
@@ -164,7 +165,7 @@ for i, tensordict_data in enumerate(collector):
         for _ in range(frames_per_batch // sub_batch_size):
             # Recurrent state should not backprop across sub-batches
             tensordict_data = tensordict_data.detach()
-            twc_net.detach()
+            twc_net._detach()
             subdata = replay_buffer.sample(sub_batch_size).detach()
             loss_vals = loss_module(subdata.to(device))
             loss_value = (
