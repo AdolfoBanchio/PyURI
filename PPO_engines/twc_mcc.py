@@ -185,7 +185,7 @@ def train_ppo(cfg: PPOCfg):
 
         # Bootstrap value
         with torch.no_grad():
-            v_boot = ac.value_stateful(torch.as_tensor(obs, dtype=torch.float32, device=device).unsqueeze(0)).squeeze(0)
+            v_boot = ac.act_value_stateful(torch.as_tensor(obs, dtype=torch.float32, device=device).unsqueeze(0)).squeeze(0)
 
         # Stack tensors
         obs_seq = torch.stack(obs_seq, 0)
