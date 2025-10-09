@@ -47,8 +47,8 @@ class ActorCriticTWC(nn.Module):
     def __init__(self, obs_dim: int, act_dim: int, device: torch.device):
         super().__init__()
         self.device = device
-        self.actor_twc  = build_twc(action_decoder=mountaincar_pair_encoder(), use_json_w=True).to(device)
-        self.critic_twc = build_twc(action_decoder=mountaincar_pair_encoder(), use_json_w=True).to(device)
+        self.actor_twc  = build_twc(action_decoder=mountaincar_pair_encoder(), log_stats=False).to(device)
+        self.critic_twc = build_twc(action_decoder=mountaincar_pair_encoder(), log_stats=False).to(device)
         with torch.no_grad():
             dummy = torch.zeros(1, obs_dim, dtype=torch.float32, device=device)
             n_out = self.actor_twc(dummy).shape[-1]
