@@ -12,6 +12,7 @@ def build_tw_edges(
     const_value: float = 1.0,
     random_seed: int = 0,
     sort_by_dst: bool = True,
+    use_json_weights: bool = False,
 ) -> Dict:
     """
     Build channel-separated SPARSE edge lists for a 3-block split:
@@ -19,6 +20,10 @@ def build_tw_edges(
       - hidden -> hidden
       - hidden -> output
     Channels: data['channels'] must map {"EX":0,"IN":1,"GJ":2} (only used for validation).
+
+    If `use_json_weights` is True, the weight for each edge is taken from
+    the `weight` field in `data["edges"]`. Otherwise, weights are randomly
+    initialized using the selected `init` scheme.
 
     Returns:
       {
@@ -58,6 +63,12 @@ def build_tw_edges(
         "in2hid": {"EX": ([], []), "IN": ([], []), "GJ": ([], [])},
         "hid":    {"EX": ([], []), "IN": ([], []), "GJ": ([], [])},
         "hid2out":{"EX": ([], []), "IN": ([], []), "GJ": ([], [])},
+    }
+    # Optional: weights provided by JSON
+    weights_buckets = {
+        "in2hid": {"EX": [], "IN": [], "GJ": []},
+        "hid":    {"EX": [], "IN": [], "GJ": []},
+        "hid2out":{"EX": [], "IN": [], "GJ": []},
     }
 
     # Classify edges into buckets
@@ -103,6 +114,13 @@ def build_tw_edges(
 
         buckets[bucket][etype][0].append(src_local)  # src list
         buckets[bucket][etype][1].append(dst_local)  # dst list
+        if use_json_weights:
+            try:
+                wv = float(e.get("weight", const_value))
+            except Exception:
+                warnings.warn(f"Edge {src}->{dst} missing/invalid weight; defaulting to {const_value}.")
+                wv = float(const_value)
+            weights_buckets[bucket][etype].append(wv)
 
     # Helper: init per-edge weights with fan-in/out aware bounds (per edge)
     def init_edge_weights(src: torch.LongTensor, dst: torch.LongTensor, n_pre: int, n_post: int) -> torch.Tensor:
@@ -110,39 +128,31 @@ def build_tw_edges(
         if E == 0:
             return torch.zeros(0, device=device, dtype=dtype)
 
-        # fan_in per post, fan_out per pre
-        fan_in_per_post = torch.zeros(n_post, dtype=torch.long)
-        fan_out_per_pre = torch.zeros(n_pre, dtype=torch.long)
-        # Count degrees
-        fan_in_per_post.index_add_(0, dst.cpu(), torch.ones(E, dtype=torch.long))
-        fan_out_per_pre.index_add_(0, src.cpu(), torch.ones(E, dtype=torch.long))
-        fan_in = fan_in_per_post[dst.cpu()].clamp(min=1).to(torch.float32)   # (E,)
-        fan_out = fan_out_per_pre[src.cpu()].clamp(min=1).to(torch.float32) # (E,)
+        # Compute fan-in per post neuron and fan-out per pre neuron
+        # Use bincount for simplicity and speed, keep work on CPU then index
+        src_cpu = src.detach().cpu()
+        dst_cpu = dst.detach().cpu()
+        fan_in_per_post = torch.bincount(dst_cpu, minlength=n_post)
+        fan_out_per_pre = torch.bincount(src_cpu, minlength=n_pre)
+        fan_in = fan_in_per_post[dst_cpu].clamp_min(1).to(torch.float32)
+        fan_out = fan_out_per_pre[src_cpu].clamp_min(1).to(torch.float32)
 
-        # Create weights
-        w = torch.empty(E, device=device, dtype=dtype)
+        if init == "constant":
+            return torch.full((E,), const_value, device=device, dtype=dtype)
 
         if init == "kaiming_uniform":
-            # bound = gain * sqrt(6 / fan_in)
-            bound = (gain * (6.0 / fan_in).sqrt()).to(device=device,dtype=dtype)
-            # sample in [-bound, +bound] per edge
-            w.uniform_(-1.0, 1.0).mul_(bound)
+            denom = fan_in  # per-edge
+            bound = (gain * (6.0 / denom).sqrt()).to(device=device, dtype=dtype)
+            return (torch.rand(E, device=device, dtype=dtype) * 2.0 - 1.0) * bound
         elif init == "xavier_uniform":
-            # bound = gain * sqrt(6 / (fan_in + fan_out))
-            denom = (fan_in + fan_out).clamp(min=1.0)
-            bound = (gain * (6.0 / denom).sqrt()).to(device=device,dtype=dtype)
-            w.uniform_(-1.0, 1.0).mul_(bound)
+            denom = (fan_in + fan_out).clamp_min(1.0)
+            bound = (gain * (6.0 / denom).sqrt()).to(device=device, dtype=dtype)
+            return (torch.rand(E, device=device, dtype=dtype) * 2.0 - 1.0) * bound
         elif init == "normal":
-            # std = gain / sqrt(fan_in)
-            std = (gain / fan_in.sqrt()).to(device=device,dtype=dtype)
-            # draw N(0,1) then scale per-edge
-            w.normal_(0.0, 1.0).mul_(std)
-        elif init == "constant":
-            w.fill_(const_value)
+            std = (gain / fan_in.sqrt()).to(device=device, dtype=dtype)
+            return torch.randn(E, device=device, dtype=dtype) * std
         else:
             raise ValueError(f"Unknown init '{init}'")
-
-        return w
 
     # Materialize tensors (src,dst,w) for each bucket/channel
     out = {
@@ -171,7 +181,14 @@ def build_tw_edges(
                 perm = torch.argsort(dst)
                 src = src[perm]; dst = dst[perm]
 
-            w = init_edge_weights(src, dst, n_pre=n_pre, n_post=n_post)
+            # Weights: from JSON or random init
+            if use_json_weights:
+                w_list = weights_buckets[block][etype]
+                w = torch.tensor(w_list, dtype=dtype, device=device)
+                if sort_by_dst:
+                    w = w[perm]
+            else:
+                w = init_edge_weights(src, dst, n_pre=n_pre, n_post=n_post)
             out[block][etype] = {"src": src, "dst": dst, "w": w}
 
     finalize_bucket("in2hid", n_pre=N_in,  n_post=N_hid)

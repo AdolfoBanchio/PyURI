@@ -1,19 +1,12 @@
 import gymnasium as gym
 from utils.twc_builder import build_twc
-from utils.twc_io_wrapper import TwcIOWrapper, mountaincar_pair_encoder
-from FIURI_node import FIURI_node
+from utils.twc_io_wrapper import mountaincar_pair_encoder, default_action_decoder
 import torch
 import torch.nn as nn
 
 dev = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-net = build_twc()
-
-mc_wrapper = TwcIOWrapper(
-    net=net,
-    device=dev,
-    obs_encoder=mountaincar_pair_encoder(),
-)
-print(mc_wrapper.net)
+net = build_twc(action_decoder=mountaincar_pair_encoder(),
+                use_json_w=True)
 
 env = gym.make("MountainCarContinuous-v0", render_mode="human")  # default goal_velocity=0
 obs, info = env.reset(seed=123)
@@ -27,8 +20,8 @@ episode = 0
 while not episode_over:
     print(f"== episode {episode} ==")
 
-    out_s = mc_wrapper.step(obs)
-    action =  mc_wrapper.decode_action(out_s)
+    out_s = net.forward(obs)
+    action = default_action_decoder(out_s)
 
     obs, reward, terminated, truncated, info = env.step(action.detach().numpy())
     print(f"obs from env {obs}")

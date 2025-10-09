@@ -10,7 +10,7 @@ import torch.nn as nn
 import torch.optim as optim
 
 from utils.twc_builder import build_twc
-from utils.twc_io_wrapper import TwcIOWrapper, mountaincar_pair_encoder, stochastic_action_decoder
+from utils.twc_io_wrapper import mountaincar_pair_encoder, stochastic_action_decoder
 
 # ============= HELPER FUNCTIONS/CLASSES ===============
 def atanh_safe(a: torch.Tensor, eps: float = 1e-6) -> torch.Tensor:
@@ -150,29 +150,21 @@ class TwcPPOAgent:
         self.obs_space = self.env.observation_space
         self.act_space = self.env.action_space
 
-        net_actor = build_twc()
-        net_critic = build_twc()
+        net_actor = build_twc(action_decoder=mountaincar_pair_encoder(),
+                              use_json_w=True)
+        net_critic = build_twc(action_decoder=mountaincar_pair_encoder(),
+                              use_json_w=True)
         
-        self.actor = TwcIOWrapper(
-            net=net_actor,
-            device=cfg.device,
-            obs_encoder=mountaincar_pair_encoder(),
-            action_decoder=None,  # we’ll sample ourselves via tanh_gaussian_*
-        )
+        self.actor = net_actor
         
-        self.critic = TwcIOWrapper(
-            net=net_critic,
-            device=cfg.device,
-            obs_encoder=mountaincar_pair_encoder(),
-            action_decoder=None,
-        )
+        self.critic = net_critic
         
         self.value_head = ValueHead(in_dim=2).to(cfg.device)
         
         # separate (or shared) optimizer — start shared for simplicity
-        params = list(self.actor.net.parameters()) + list(self.critic.net.parameters()) + list(self.value_head.parameters())
+        params = list(self.actor.parameters()) + list(self.critic.parameters()) + list(self.value_head.parameters())
         self.optimizer = optim.Adam(params, lr=cfg.lr)
-        assert any(p.requires_grad for p in self.actor.net.parameters())
+        assert any(p.requires_grad for p in self.actor.parameters())
         self.ent_coef     = 0.01     # small exploration
         self.target_kl    = 0.03     # early-stop threshold per epoch
         self.vf_clip_coef = 0.2      # value loss clipping
@@ -188,14 +180,14 @@ class TwcPPOAgent:
             self.actor.reset(); self.critic.reset()
             # actor forward
             with torch.no_grad():
-                out_act = self.actor.step(obs_t)             # (1,2)
+                out_act = self.actor.forward(obs_t)             # (1,2)
             mean, log_std = policy_params_from_outstate(out_act)
             a = tanh_gaussian_sample(mean, log_std)      # (1,1)
             logp = tanh_gaussian_logp(mean, log_std, a)  # (1,1)
 
             # critic forward
             with torch.no_grad():
-                out_crit = self.critic.step(obs_t)           # (1,2)
+                out_crit = self.critic.forward(obs_t)           # (1,2)
             v = self.value_head(out_crit)                # (1,1)
 
             act_np = a.squeeze(0).cpu().numpy()
@@ -211,7 +203,7 @@ class TwcPPOAgent:
 
         # bootstrap from critic
         with torch.no_grad():
-            last_out = self.critic.step(torch.as_tensor(obs, dtype=torch.float32, device=self.device).unsqueeze(0))
+            last_out = self.critic.forward(torch.as_tensor(obs, dtype=torch.float32, device=self.device).unsqueeze(0))
         last_value = self.value_head(last_out)  # (1,1)
 
         adv, ret = compute_gae(buf.rew, buf.val, buf.done, last_value, self.cfg.gamma, self.cfg.gae_lambda)
@@ -244,7 +236,7 @@ class TwcPPOAgent:
                 self.actor.reset()
                 self.critic.reset()
 
-                out_act = self.actor.step(mb_obs)                     # (B,2)
+                out_act = self.actor.forward(mb_obs)                     # (B,2)
                 mean, log_std = policy_params_from_outstate(out_act)
                 new_logp = tanh_gaussian_logp(mean, log_std, mb_act)  # (B,1)
                 ratio = (new_logp - mb_oldp).exp()
@@ -254,7 +246,7 @@ class TwcPPOAgent:
                 policy_loss = -torch.min(pg1, pg2).mean()
 
                 # critic
-                out_crit = self.critic.step(mb_obs)
+                out_crit = self.critic.forward(mb_obs)
                 v_pred = self.value_head(out_crit)
                 # clipped value loss like PPO2
                 v_clipped = (batch["val"][ids].detach() if "val" in batch else v_pred.detach()) + (v_pred - (batch["val"][ids].detach() if "val" in batch else v_pred.detach())).clamp(-self.vf_clip_coef, self.vf_clip_coef)
@@ -267,10 +259,10 @@ class TwcPPOAgent:
 
                 self.optimizer.zero_grad(set_to_none=True)
                 loss.backward()
-                actor_grads = [p.grad for p in self.actor.net.parameters() if p.grad is not None]
+                actor_grads = [p.grad for p in self.actor.parameters() if p.grad is not None]
                 assert len(actor_grads) > 0, "no actor gradients — check no_grad/detach"
-                nn.utils.clip_grad_norm_(self.actor.net.parameters(), self.cfg.max_grad_norm)
-                nn.utils.clip_grad_norm_(self.critic.net.parameters(), self.cfg.max_grad_norm)
+                nn.utils.clip_grad_norm_(self.actor.parameters(), self.cfg.max_grad_norm)
+                nn.utils.clip_grad_norm_(self.critic.parameters(), self.cfg.max_grad_norm)
                 nn.utils.clip_grad_norm_(self.value_head.parameters(), self.cfg.max_grad_norm)
                 self.optimizer.step()
 
@@ -283,7 +275,7 @@ class TwcPPOAgent:
                 print(f"Early stop: KL {np.mean(approx_kl_epoch):.4f} > {1.5*self.target_kl:.4f}")
                 break
 
-            for name, param in self.actor.net.named_parameters():
+            for name, param in self.actor.named_parameters():
                 if param.grad is not None:
                     print(f"Gradient for {name}: {param.grad}")
                 else:

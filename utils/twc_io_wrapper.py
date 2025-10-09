@@ -83,105 +83,11 @@ def default_action_decoder(
     a = torch.tanh(gain * (fwd - rev))
     return a.unsqueeze(-1)  # (batch, 1)
 
-class TwcIOWrapper:
-    """
-    Wrap a TWC Network (utils.twc_builder.build_TWC()) with sensory Input wiring
-    and provide modular obs encoding and action decoding suitable for
-    MountainCarContinuous (1-D action in [-1, 1]).
-
-    - Exposes step(obs) -> action and access to last out_state for policy/value heads.
-
-    TODO: Add arguments description.
-    """
-
-    def __init__(
-        self,
-        net: Module,
-        device,
-        *,
-        obs_encoder: Optional[Callable[[torch.Tensor, int, torch.device], torch.Tensor]] = None,
-        action_decoder: Optional[Callable[[torch.Tensor], torch.Tensor]] = None,
-    ) -> None:
-        self.device = device
-        self.dtype = torch.float32
-        self.net = net
-        self.n_inputs = 4
-        net.to(device=device)
-
-        self.obs_encoder = obs_encoder
-        self.action_decoder = action_decoder
-
-
-    def _standardize_obs(self, obs) -> torch.Tensor:
-        """
-        Standardize a Gym observation to a batched tensor of shape (B, 2).
-        Accepts list/tuple/np.ndarray/torch.Tensor and squeezes singleton dims
-        like (2,), (2,1), (1,2,1). Ensures final trailing dim is 2.
-        """
-        if isinstance(obs, torch.Tensor):
-            o = obs
-        else:
-            o = torch.as_tensor(obs)
-
-        o = o.to(self.device)
-        o = o.squeeze()
-
-        if o.ndim == 1:
-            if o.numel() != 2:
-                raise ValueError(f"Expected 2 elements in 1D obs, got {o.numel()}")
-            o = o.unsqueeze(0)
-        elif o.ndim == 2:
-            if o.shape[1] != 2 and o.shape[0] == 2:
-                o = o.t()
-            if o.shape[1] != 2:
-                raise ValueError(f"Expected obs shape (B,2), got {tuple(o.shape)}")
-        else:
-            raise ValueError(f"Unsupported obs ndim {o.ndim}; expected 1 or 2")
-
-        return o
-
-    def encode_obs(self, obs: torch.Tensor) -> torch.Tensor:
-        """  
-            Given an observation of a enviroments 
-            encodes to a correct input representation to TWC
-        """
-        if self.obs_encoder is None:
-            return default_obs_encoder(obs.to(self.device, dtype=self.dtype), n_inputs=self.n_inputs, device=self.device)
-        # Backward-compat with simple callables expecting (obs, n_inputs, device)
-        return self.obs_encoder(obs.to(self.device, dtype=self.dtype), self.n_inputs, self.device)
-
-    def decode_action(self, out_state: torch.Tensor) -> torch.Tensor:
-        """  
-            Given an output state of the TWC decodes the corresponding action
-            to a enviroment.
-        """
-        if self.action_decoder is None:
-            return default_action_decoder(out_state)
-        return self.action_decoder(out_state)
-
-    def step(self, obs) -> Tuple[torch.Tensor, torch.Tensor]:
-        """
-        One environment step’s worth of network processing.
-
-        obs: single observation (2,), or batched (B,2), or with extra
-             singleton dims like (2,1) / (1,2,1). All are standardized to (B,2).
-        returns: out_state: (batch, n_out))
-
-        Step action must be calculated using the self.decode_action
-        """
-        obs_std = self._standardize_obs(obs)
-        x = self.encode_obs(obs_std)  # (B, n_inputs, 3)
-        B = x.shape[0]
-
-        out_state = self.net.forward(x)
-        return out_state
-
-    def reset(self) -> None:
-        """Reset internal states across TWC layers (call at episode boundaries)."""
-        self.net.reset_state_variables()
-
-    def detach(self) -> None:
-        self.net.detach()
+"""
+This module now provides only observation encoders and action decoders.
+The TWC network built in `utils.twc_builder.build_twc` accepts raw observations
+directly and performs encoding internally via the provided decoder.
+"""
 
 
 # -------- Pairwise IN encoder (positive/negative neuron per variable) --------
@@ -212,8 +118,36 @@ def make_pairwise_in_encoder(
 
     Returns a callable(obs, n_inputs, device) -> (batch, n_inputs, 3).
     """
+    def _standardize_obs(obs, device) -> torch.Tensor:
+        """
+        Standardize a Gym observation to a batched tensor of shape (B, 2).
+        Accepts list/tuple/np.ndarray/torch.Tensor and squeezes singleton dims
+        like (2,), (2,1), (1,2,1). Ensures final trailing dim is 2.
+        """
+        if isinstance(obs, torch.Tensor):
+            o = obs
+        else:
+            o = torch.as_tensor(obs)
 
+        o = o.to(device)
+        o = o.squeeze()
+
+        if o.ndim == 1:
+            if o.numel() != 2:
+                raise ValueError(f"Expected 2 elements in 1D obs, got {o.numel()}")
+            o = o.unsqueeze(0)
+        elif o.ndim == 2:
+            if o.shape[1] != 2 and o.shape[0] == 2:
+                o = o.t()
+            if o.shape[1] != 2:
+                raise ValueError(f"Expected obs shape (B,2), got {tuple(o.shape)}")
+        else:
+            raise ValueError(f"Unsupported obs ndim {o.ndim}; expected 1 or 2")
+
+        return o
+    
     def encoder(obs: torch.Tensor, n_inputs: int, device: torch.device) -> torch.Tensor:
+        obs = _standardize_obs(obs, device)
         assert obs.ndim == 2, "obs must be (batch, D)"
         B = obs.shape[0]
         x = torch.zeros(B, 2, n_inputs, dtype=obs.dtype, device=obs.device)

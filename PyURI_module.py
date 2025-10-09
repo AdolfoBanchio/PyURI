@@ -85,8 +85,12 @@ class FIURIModule(nn.Module):
         self.decay     = nn.Parameter(d_init, requires_grad=True) if learn_decay     else d_init
 
         # --- persistent state buffers (allocated lazily with correct batch/device/dtype)
-        self.register_buffer("in_state", torch.tensor(initial_in_state, dtype=torch.float))  # E (batch, n)
-        self.register_buffer("out_state", torch.tensor(initial_out_state, dtype=torch.float))  # O/output (batch, n) — BindsNET convention      
+        """
+        self.register_buffer("in_state", torch.tensor(initial_in_state, dtype=torch.float32))  # E (batch, n)
+        self.register_buffer("out_state", torch.tensor(initial_out_state, dtype=torch.float32))  # O/output (batch, n) — BindsNET convention      
+        """
+        self.in_state = torch.tensor(initial_in_state, dtype=torch.float32)
+        self.out_state = torch.tensor(initial_out_state, dtype=torch.float32)
         # defaults for initial states (scalars stored just to use at first allocation)
         self._init_E = float(initial_in_state)
         self._init_O = float(initial_out_state)
