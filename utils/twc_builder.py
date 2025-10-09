@@ -15,8 +15,8 @@ def create_layer(n_neurons) -> FIURIModule:
         num_cells=n_neurons,
         initial_in_state=0.0,
         initial_out_state=0.0,
-        initial_threshold=-10.0,
-        initial_decay=0.1,
+        initial_threshold=-5.0,
+        initial_decay=0.0,
         learn_threshold=True,
         learn_decay=True,
         clamp_min=-10.0,
@@ -24,7 +24,7 @@ def create_layer(n_neurons) -> FIURIModule:
     )
 
 def build_twc(action_decoder: Callable,
-              use_json_w: bool = False,) -> nn.Module:
+              log_stats: bool = True) -> nn.Module:
     """ Extracts the data from thr TWC description
     and returns a nn.Module with the TWC implementation
     """
@@ -79,6 +79,15 @@ def build_twc(action_decoder: Callable,
             # I/O
             self.decoder = action_decoder
 
+            # MONITOR
+            self.log = log_stats
+            self.monitor = {
+                "in": [],
+                "hid": [],
+                "out": [],
+            }
+
+
         def forward(self, x: torch.Tensor) -> torch.Tensor:
             """
             One TWC step.
@@ -132,6 +141,8 @@ def build_twc(action_decoder: Callable,
             ex_o = self.hid2out(h_o_2)                   # (B, n_out)
             y = self.out_layer(ex_o)                     # output layer step
 
+            if self.log:
+                self.log_monitor()
             return y
         
         def reset(self):
@@ -142,9 +153,24 @@ def build_twc(action_decoder: Callable,
             self.hid_layer.reset_state() 
             self.out_layer.reset_state() 
         
-        def _detach(self):
+        def detach(self):
             self.in_layer.detach()
             self.hid_layer.detach()
             self.out_layer.detach()
+
+        def log_monitor(self):
+            """  
+            In each layer list logs a dictonary like this
+            {
+            "in_state":self.in_state,
+            "out_state": self.out_state,
+            "threshold": self.threshold,
+            "decay_factor": self.decay,
+            }
+            """
+            self.monitor["in"].append(self.in_layer.get_state())
+            self.monitor["hid"].append(self.hid_layer.get_state())
+            self.monitor["out"].append(self.out_layer.get_state())
+
 
     return TWC()

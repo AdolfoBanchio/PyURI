@@ -152,6 +152,11 @@ def make_pairwise_in_encoder(
         B = obs.shape[0]
         x = torch.zeros(B, 2, n_inputs, dtype=obs.dtype, device=obs.device)
 
+        def _split_channels(val: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+            ex = torch.clamp(val, min=0.0)
+            inh = torch.clamp(-val, min=0.0)
+            return ex, inh
+
         for p in pairs:
             v = obs[:, p.obs_index]
 
@@ -167,12 +172,16 @@ def make_pairwise_in_encoder(
                 if clamp_to_state_range:
                     pot = pot.clamp(min=p.minState, max=p.maxState)
 
-                x[mask_pos, 0,p.positive_index] = pot
-                x[mask_pos, 1,p.positive_index] = pot
+                ex_val, in_val = _split_channels(pot)
+                x[mask_pos, 0, p.positive_index] = ex_val
+                x[mask_pos, 1, p.positive_index] = in_val
 
                 if set_inactive_to_min_state:
-                    x[mask_pos,0, p.negative_index] = p.minState
-                    x[mask_pos,1, p.negative_index] = p.minStateinput
+                    inactive_ex, inactive_in = _split_channels(
+                        torch.as_tensor(p.minState, dtype=obs.dtype, device=obs.device)
+                    )
+                    x[mask_pos, 0, p.negative_index] = inactive_ex
+                    x[mask_pos, 1, p.negative_index] = inactive_in
 
             if mask_neg.any():
                 cor = v[mask_neg] / (-p.minVal)
@@ -180,12 +189,16 @@ def make_pairwise_in_encoder(
                 if clamp_to_state_range:
                     pot = pot.clamp(min=p.minState, max=p.maxState)
 
-                x[mask_neg, 0, p.negative_index] = pot
-                x[mask_neg, 1, p.negative_index] = pot
+                ex_val, in_val = _split_channels(pot)
+                x[mask_neg, 0, p.negative_index] = ex_val
+                x[mask_neg, 1, p.negative_index] = in_val
 
                 if set_inactive_to_min_state:
-                    x[mask_neg, 0, p.positive_index] = p.minState
-                    x[mask_neg, 1, p.positive_index] = p.minState
+                    inactive_ex, inactive_in = _split_channels(
+                        torch.as_tensor(p.minState, dtype=obs.dtype, device=obs.device)
+                    )
+                    x[mask_neg, 0, p.positive_index] = inactive_ex
+                    x[mask_neg, 1, p.positive_index] = inactive_in
 
         return x
 
@@ -208,7 +221,7 @@ def mountaincar_pair_encoder(
         InterfacePair(obs_index=1, valleyVal=0.0,  minVal=-0.07, maxVal=0.07, positive_index=3, negative_index=0),
     ]
     return make_pairwise_in_encoder(pairs, 
-                                    set_inactive_to_min_state=False,
+                                    set_inactive_to_min_state=True,
                                     clamp_to_state_range=clamp_to_state_range)
 
 

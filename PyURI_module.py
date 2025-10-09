@@ -293,6 +293,15 @@ class FIURIModule(nn.Module):
 
         self.out_state = self.out_state.detach()
 
+    def get_state(self) -> dict:
+        return {
+            "in_state":self.in_state,
+            "out_state": self.out_state,
+            "threshold": self.threshold,
+            "decay_factor": self.decay,
+        }
+    
+    
 class FiuriDenseConn(nn.Module):
     """  
         This class is intended to be used to connect FIURI layers with EX/IN conns
