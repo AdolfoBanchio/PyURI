@@ -35,13 +35,13 @@ device = (
 )
 
 # HYPERPARAMETERS AND DATA COLLECTION PARAMS
-lr = 3e-4
+lr = 5e-3
 max_grad_norm = 1.0
 
 frames_per_batch = 1024
-total_frames = 10_240*100
+total_frames = 10_240*10
 
-sub_batch_size = 128  # cardinality of the sub-samples gathered from the current data in the inner loop
+sub_batch_size = 256  # cardinality of the sub-samples gathered from the current data in the inner loop
 num_epochs = 10  # optimization steps per batch of data collected
 clip_epsilon = (
     0.2  # clip value for PPO loss: see the equation in the intro for more context.
