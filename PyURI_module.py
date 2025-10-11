@@ -104,12 +104,33 @@ class FIURIModule(nn.Module):
         return F.softplus(self.threshold)
     
     def dec_pos(self):
-        return torch.clamp(F.softplus(self.decay), max=0.5)
+        return F.softplus(self.decay)
 
     def _ensure_state(self, B: int, device, dtype):
-        if self.in_state.ndim != 2 or self.in_state.shape != (B, self.num_cells):
-            self.in_state  = torch.full((B, self.num_cells), self._init_E, device=device, dtype=dtype)
-            self.out_state = torch.full((B, self.num_cells), self._init_O, device=device, dtype=dtype)
+        shape_mismatch = (self.in_state.ndim != 2) or (self.in_state.shape != (B, self.num_cells))
+        if shape_mismatch:
+            # Preserve existing state where available and only initialize new rows.
+            prev_in = self.in_state if self.in_state.ndim == 2 else None
+            prev_out = self.out_state if self.out_state.ndim == 2 else None
+
+            new_in = torch.full((B, self.num_cells), self._init_E, device=device, dtype=dtype)
+            new_out = torch.full((B, self.num_cells), self._init_O, device=device, dtype=dtype)
+
+            if prev_in is not None:
+                rows_to_copy = min(B, prev_in.shape[0])
+                new_in[:rows_to_copy] = prev_in[:rows_to_copy].to(device=device, dtype=dtype)
+            if prev_out is not None:
+                rows_to_copy = min(B, prev_out.shape[0])
+                new_out[:rows_to_copy] = prev_out[:rows_to_copy].to(device=device, dtype=dtype)
+
+            self.in_state = new_in
+            self.out_state = new_out
+        else:
+            # Ensure buffers live on the requested device/dtype without altering values.
+            if self.in_state.device != device or self.in_state.dtype != dtype:
+                self.in_state = self.in_state.to(device=device, dtype=dtype)
+            if self.out_state.device != device or self.out_state.dtype != dtype:
+                self.out_state = self.out_state.to(device=device, dtype=dtype)
 
     @torch.no_grad()
     def reset_state(self, B: int = None, device=None, dtype=None):
@@ -151,8 +172,8 @@ class FIURIModule(nn.Module):
             S = self.in_state
 
         # Make sure params are on the same device/dtype as S
-        T = self.thr_pos().view(1, -1)
-        d = self.dec_pos().view(1, -1)
+        T = self.threshold.view(1, -1) # treshold can be negative.
+        d = self.dec_pos().view(1, -1) # makes sense to mantain decay factor positive
 
         eps_abs = 1e-8
         eps_rel = 1e-6
@@ -160,7 +181,7 @@ class FIURIModule(nn.Module):
 
         gt = S > T
         mask = (~gt) & no_stim
-        new_o = F.relu(S - T)
+        new_o = F.softplus(S - T, beta=5)
         new_e = torch.where(S > T, new_o, torch.where(mask, self.in_state - d, S))
 
         self.out_state = new_o
@@ -301,7 +322,7 @@ class FIURIModule(nn.Module):
             "decay_factor": self.decay,
         }
     
-    
+
 class FiuriDenseConn(nn.Module):
     """  
         This class is intended to be used to connect FIURI layers with EX/IN conns
@@ -363,8 +384,8 @@ class FiuriSparseGJConn(nn.Module):
         self.register_buffer("gj_idx", gj_edges.long())
         E = gj_edges.shape[1]
         self.gj_w = nn.Parameter(torch.empty(E))
-        nn.init.normal(self.gj_w)
+        nn.init.normal_(self.gj_w)
 
     def forward(self, o_pre):
-        # Return bundle; FIURIModule applies softplus(w) and sum
+        # Return bundle
         return (self.gj_idx[0], self.gj_idx[1], self.gj_w)

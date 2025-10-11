@@ -15,15 +15,16 @@ def create_layer(n_neurons) -> FIURIModule:
         num_cells=n_neurons,
         initial_in_state=0.0,
         initial_out_state=0.0,
-        initial_threshold=-5.0,
-        initial_decay=0.0,
+        initial_threshold=0.0,
+        initial_decay=0.01,
         learn_threshold=True,
         learn_decay=True,
         clamp_min=-10.0,
         clamp_max=10.0,
     )
 
-def build_twc(action_decoder: Callable,
+def build_twc(obs_encoder: Callable,
+              action_decoder: Callable,
               log_stats: bool = True) -> nn.Module:
     """ Extracts the data from thr TWC description
     and returns a nn.Module with the TWC implementation
@@ -77,7 +78,8 @@ def build_twc(action_decoder: Callable,
             self.hid2out = hid2out_EX
 
             # I/O
-            self.decoder = action_decoder
+            self.obs_encoder = obs_encoder
+            self.action_decoder = action_decoder
 
             # MONITOR
             self.log = log_stats
@@ -91,59 +93,44 @@ def build_twc(action_decoder: Callable,
         def forward(self, x: torch.Tensor) -> torch.Tensor:
             """
             One TWC step.
-                Accepts either:
-                  - raw observation (B, 2) -> will be encoded via decoder into (B, n_inputs, 3)
-                  - already-encoded input (B, n_inputs, 3)
+                Accepts:
+                  - raw observation (B, 2) -> will be encoded via the function provided.
 
-                When creating the module a proper input decoder to the 4 sensory neurons must be provided
+                When creating the module a proper input encoder to the 4 sensory neurons must be provided
                 if you plan to pass raw observations. Decoder must accept keyword args
                 n_inputs and device (compatible with utils.twc_io_wrapper.default_obs_encoder).
             """
             device = next(self.parameters()).device
-            if x.ndim == 3: # looks like a already encoded observation
-                z = x
-            else: # let the encoder manage it completly
-                if self.decoder is None:
-                    raise ValueError("Decoder is None but raw observations were provided to TWC.forward")
-                z = self.decoder(x, n_inputs=4, device=device)
+
+            ex_in, in_in = self.obs_encoder(x, n_inputs=4, device=device)            
+            in_out = self.in_layer(ex_in - in_in)
+            hid_out = None
+            for _ in range(3):
+                # input -> hidden
+                in2hid_influence = self.in2hid_IN(in_out)
+                in2hid_gj_bundle = self.in2hid_GJ(in_out)
+
+                # hidden -> hidden (one recurrent step)
+                hid_out = self.hid_layer(in2hid_influence, gj_bundle=in2hid_gj_bundle, o_pre=in_out)
+                hid_ex_influence = self.hid_EX(hid_out)
+                hid_in_influence = self.hid_IN(hid_out)
+                hid_out = self.hid_layer(hid_ex_influence + hid_in_influence)
+                self.in_layer.neuron_step()
             
-            # Normalize encoder output layout -> ex_in, in_in (B, n_in)
-            if z.ndim != 3:
-                raise ValueError(f"Encoded input must be 3D; got {z.ndim}D")
-            Bz, A, Bdim = z.shape
-            if A == self.in_layer.num_cells and Bdim in (2, 3):
-                # (B, n_in, C)
-                ex_in = z[:, :, 0]
-                in_in = z[:, :, 1]
-            elif Bdim == self.in_layer.num_cells and A in (2, 3):
-                # (B, C, n_in)
-                ex_in = z[:, 0, :]
-                in_in = z[:, 1, :]
-            else:
-                raise ValueError(f"Encoded input has incompatible shape {tuple(z.shape)} for n_in={self.in_layer.num_cells}")
-
-            B = ex_in.size(0)
-            
-            in_o = self.in_layer(ex_in - in_in)
-
-            # input -> hidden
-            in_influence = self.in2hid_IN(in_o)
-            in_gj_bundle = self.in2hid_GJ(in_o)
-
-            h_o = self.hid_layer(in_influence, gj_bundle=in_gj_bundle, o_pre=in_o)
-
-            # hidden -> hidden (one recurrent step)
-            ex_h = self.hid_EX(h_o)                      # (B, n_hid)
-            in_h = self.hid_IN(h_o)                      # (B, n_hid)
-            h_o_2 = self.hid_layer(ex_h + in_h)          # chem_influence only
-
             # --- hidden -> output (EX only)
-            ex_o = self.hid2out(h_o_2)                   # (B, n_out)
-            y = self.out_layer(ex_o)                     # output layer step
-
+            hid2out_ex_influence = self.hid2out(hid_out)
+            y = self.out_layer(hid2out_ex_influence)
+            
             if self.log:
                 self.log_monitor()
             return y
+        
+        def get_action(self, y):
+            """  
+            Uses the action decoder provided to generate an enviroment action.
+            Uses reads net output as ['REV', 'FWD']
+            """
+            return self.action_decoder(y)
         
         def reset(self):
             """  

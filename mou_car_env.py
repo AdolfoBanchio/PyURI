@@ -1,35 +1,26 @@
 import gymnasium as gym
 from utils.twc_builder import build_twc
-from utils.twc_io_wrapper import mountaincar_pair_encoder, default_action_decoder
+from utils.twc_io import mcc_obs_encoder, twc_out_2_mcc_action
 import torch
 import torch.nn as nn
 
 dev = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-net = build_twc(action_decoder=mountaincar_pair_encoder(),
-                use_json_w=True)
+twc = build_twc(obs_encoder=mcc_obs_encoder,
+                action_decoder=twc_out_2_mcc_action,
+                log_stats=False)
 
 env = gym.make("MountainCarContinuous-v0", render_mode="human")  # default goal_velocity=0
 obs, info = env.reset(seed=123)
 
-print(f"starting obs {obs}")
-
-episode_over = False
-total_reward = 0
-episode = 0
-
-while not episode_over:
-    print(f"== episode {episode} ==")
-
-    out_s = net.forward(obs)
-    action = default_action_decoder(out_s)
-
-    obs, reward, terminated, truncated, info = env.step(action.detach().numpy())
-    print(f"obs from env {obs}")
-    obs_tensor = torch.as_tensor(obs, dtype=torch.float32).unsqueeze(0)
-
-    total_reward += reward
-    episode_over = terminated or truncated
-    episode +=1
-
-print(f"episode over, total reward: {total_reward}")
+for ep in range(1):
+    twc.reset()
+    obs, _ = env.reset()
+    done, total_r = False, 0.0
+    while not done:
+        x = torch.tensor(obs, dtype=torch.float32, device=next(twc.parameters()).device).unsqueeze(0)  # (1,2)
+        y = twc(x)                       # (1,2)
+        a = twc.get_action(y)         # (1,1)
+        obs, r, terminated, truncated, _ = env.step(a.squeeze(0).cpu().numpy())
+        done = terminated or truncated
+        total_r += r
 
