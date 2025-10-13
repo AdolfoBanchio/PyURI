@@ -18,8 +18,8 @@ def mcc_obs_encoder(obs: torch.Tensor, n_inputs=4, device=None):
     """
     if device is None:
         device = obs.device
-    pos = obs[:, 0]
-    vel = obs[:, 1]
+    pos = obs[:, 0].to(device)
+    vel = obs[:, 1].to(device)
 
     pos_val = pos / POS_MAX
     vel_val = vel / VEL_MAX
@@ -32,7 +32,7 @@ def mcc_obs_encoder(obs: torch.Tensor, n_inputs=4, device=None):
     pos_in = F.softplus(-pos_n)
     vel_ex = F.softplus(vel_n)
     vel_in = F.softplus(-vel_n)
-    zero = torch.zeros(pos_ex.shape)
+    zero = torch.zeros(pos_ex.shape).to(device)
 
     ex_in = torch.stack([zero , pos_ex, zero, vel_ex], dim=1)
     in_in = torch.stack([vel_in, zero, pos_in, zero], dim=1)
