@@ -83,11 +83,11 @@ class FIURIModule(nn.Module):
         self.decay     = nn.Parameter(d_init, requires_grad=True)
         # --- persistent state buffers (allocated lazily with correct batch/device/dtype)
         
-        #self.register_buffer("in_state", torch.tensor(initial_in_state, dtype=torch.float32))  # E (batch, n)
-        #self.register_buffer("out_state", torch.tensor(initial_out_state, dtype=torch.float32))  # O/output (batch, n) — BindsNET convention      
+        self.register_buffer("in_state", torch.tensor(initial_in_state, dtype=torch.float32))  # E (batch, n)
+        self.register_buffer("out_state", torch.tensor(initial_out_state, dtype=torch.float32))  # O/output (batch, n) — BindsNET convention      
         
-        self.in_state = torch.tensor(initial_in_state, dtype=torch.float32)
-        self.out_state = torch.tensor(initial_out_state, dtype=torch.float32)
+        #self.in_state = torch.tensor(initial_in_state, dtype=torch.float32)
+        #self.out_state = torch.tensor(initial_out_state, dtype=torch.float32)
         # defaults for initial states (scalars stored just to use at first allocation)
         self._init_E = float(initial_in_state)
         self._init_O = float(initial_out_state)
@@ -170,7 +170,7 @@ class FIURIModule(nn.Module):
 
         # Make sure params are on the same device/dtype as S
         T = self.threshold.view(1, -1) # treshold can be negative.
-        d = self.dec_pos().view(1, -1) # makes sense to mantain decay factor positive
+        d = self.decay.view(1, -1) # makes sense to mantain decay factor positive
 
         eps_abs = 1e-8
         eps_rel = 1e-6
@@ -195,7 +195,7 @@ class FIURIModule(nn.Module):
 
         S = torch.clamp(self.in_state + chem_influence, self.clamp_min, self.clamp_max)
         self.neuron_step(S=S)
-        return self.out_state
+        return self.out_state, self.in_state
 
     @torch.no_grad()
     def set_internal_state(
@@ -338,7 +338,7 @@ class FiuriDenseConn(nn.Module):
                 type: str):
         super().__init__()
         if type not in ["EX","IN"]:
-            raise ValueError("Incorrect type of Fiuri Dense Connection gieven")
+            raise ValueError("Incorrect type of Fiuri Dense Connection")
         self.type = type
         self.n_pre, self.n_post = n_pre, n_post
 

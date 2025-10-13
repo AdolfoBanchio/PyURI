@@ -10,7 +10,7 @@ twc = build_twc(obs_encoder=mcc_obs_encoder,
                 log_stats=False)
 
 
-path = "models/twc_actor_ddqn_150000.pth"
+path = "models/twc_ppo_actor_final.pth"
 
 state_dict = torch.load(path)
 print(state_dict)

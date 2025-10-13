@@ -16,7 +16,7 @@ def create_layer(n_neurons) -> FIURIModule:
         initial_in_state=0.0,
         initial_out_state=0.0,
         initial_threshold=0.0,
-        initial_decay=1.0,
+        initial_decay=1,
         clamp_min=-10.0,
         clamp_max=10.0,
     )
@@ -101,7 +101,7 @@ def build_twc(obs_encoder: Callable,
             device = next(self.parameters()).device
 
             ex_in, in_in = self.obs_encoder(x, n_inputs=4, device=device)            
-            in_out = self.in_layer(ex_in - in_in)
+            in_out, _ = self.in_layer(ex_in - in_in)
             hid_out = None
             for _ in range(3):
                 # input -> hidden
@@ -109,19 +109,19 @@ def build_twc(obs_encoder: Callable,
                 in2hid_gj_bundle = self.in2hid_GJ(in_out)
 
                 # hidden -> hidden (one recurrent step)
-                hid_out = self.hid_layer(in2hid_influence, gj_bundle=in2hid_gj_bundle, o_pre=in_out)
+                hid_out, _ = self.hid_layer(in2hid_influence, gj_bundle=in2hid_gj_bundle, o_pre=in_out)
                 hid_ex_influence = self.hid_EX(hid_out)
-                hid_in_influence = self.hid_IN(hid_out)
-                hid_out = self.hid_layer(hid_ex_influence + hid_in_influence)
+                hid_in_influence= self.hid_IN(hid_out)
+                hid_out, _ = self.hid_layer(hid_ex_influence + hid_in_influence)
                 self.in_layer.neuron_step()
             
             # --- hidden -> output (EX only)
             hid2out_ex_influence = self.hid2out(hid_out)
-            y = self.out_layer(hid2out_ex_influence)
+            out_state,in_state  = self.out_layer(hid2out_ex_influence)
             
             if self.log:
                 self.log_monitor()
-            return y
+            return out_state
         
         def get_action(self, y):
             """  

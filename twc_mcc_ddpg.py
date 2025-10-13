@@ -31,8 +31,8 @@ class ActorFIURI(nn.Module):
 
     def forward(self, obs):
         # obs: (B, obs_dim). Make sure your twc uses the training-time decoder (no @torch.no_grad)
-        y = self.twc(obs)                  # (B, 2) [FWD, REV] or your chosen layout
-        a = self.twc.get_action(y)      # (B, 1) torque in [-1, 1], differentiable
+        y = self.twc(obs)                  # (B, 2) [REV, FWD]
+        a = self.twc.get_action(y)      # (B, 1) torque in [-1, 1]
         return a
 
 # 
