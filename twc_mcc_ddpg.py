@@ -355,6 +355,10 @@ env = gym.make("MountainCarContinuous-v0")
 obs_dim, act_dim = env.observation_space.shape[0], env.action_space.shape[0]
 actor, critic = ActorFIURI(twc).to(DEVICE), CriticQ(obs_dim, act_dim).to(DEVICE)
 actor_targ, critic_targ = deepcopy(actor), deepcopy(critic)
+
+actor_targ.to(DEVICE)
+critic_targ.to(DEVICE)
+
 actor_opt = torch.optim.Adam(actor.parameters(),  lr=1e-4)
 critic_opt= torch.optim.Adam(critic.parameters(), lr=5e-4)
 buf = ReplayBuffer(obs_dim, act_dim, size=100_000)

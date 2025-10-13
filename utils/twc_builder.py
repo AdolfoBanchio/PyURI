@@ -99,7 +99,6 @@ def build_twc(obs_encoder: Callable,
                 n_inputs and device (compatible with utils.twc_io_wrapper.default_obs_encoder).
             """
             device = next(self.parameters()).device
-
             ex_in, in_in = self.obs_encoder(x, n_inputs=4, device=device)            
             in_out, _ = self.in_layer(ex_in - in_in)
             hid_out = None

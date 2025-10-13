@@ -18,8 +18,8 @@ def mcc_obs_encoder(obs: torch.Tensor, n_inputs=4, device=None):
     """
     if device is None:
         device = obs.device
-    pos = obs[:, 0]
-    vel = obs[:, 1]
+    pos = obs[:, 0].to(device)
+    vel = obs[:, 1].to(device)
 
     min_fill = torch.full_like(pos, MIN_STATE, device=device)
 
