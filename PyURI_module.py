@@ -67,8 +67,6 @@ class FIURIModule(nn.Module):
         initial_out_state: Optional[float] = 0.0,  # scalar default
         initial_threshold: Optional[float] = 1.0,
         initial_decay: Optional[float] = 0.1,
-        learn_threshold: bool = True,
-        learn_decay: bool = True,
         clamp_min: float = -10.0,
         clamp_max: float = 10.0,
         **kwargs,
@@ -81,9 +79,8 @@ class FIURIModule(nn.Module):
         t_init = torch.full((num_cells,), float(initial_threshold), dtype=torch.float32)
         d_init = torch.full((num_cells,), float(initial_decay),    dtype=torch.float32)
 
-        self.threshold = nn.Parameter(t_init, requires_grad=True) if learn_threshold else t_init
-        self.decay     = nn.Parameter(d_init, requires_grad=True) if learn_decay     else d_init
-
+        self.threshold = nn.Parameter(t_init, requires_grad=True) 
+        self.decay     = nn.Parameter(d_init, requires_grad=True)
         # --- persistent state buffers (allocated lazily with correct batch/device/dtype)
         
         #self.register_buffer("in_state", torch.tensor(initial_in_state, dtype=torch.float32))  # E (batch, n)
@@ -181,7 +178,7 @@ class FIURIModule(nn.Module):
 
         gt = S > T
         mask = (~gt) & no_stim
-        new_o = F.softplus(S - T, beta=5)
+        new_o = F.softplus(S - T)
         new_e = torch.where(S > T, new_o, torch.where(mask, self.in_state - d, S))
 
         self.out_state = new_o

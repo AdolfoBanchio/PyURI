@@ -1,4 +1,7 @@
 templates/
+runs/
+models/
+
 .python-version
 .github/
 # Boilerplate gitignore

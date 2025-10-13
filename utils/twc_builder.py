@@ -16,9 +16,7 @@ def create_layer(n_neurons) -> FIURIModule:
         initial_in_state=0.0,
         initial_out_state=0.0,
         initial_threshold=0.0,
-        initial_decay=0.01,
-        learn_threshold=True,
-        learn_decay=True,
+        initial_decay=1.0,
         clamp_min=-10.0,
         clamp_max=10.0,
     )

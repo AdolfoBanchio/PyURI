@@ -1,4 +1,3 @@
-# 
 from utils.twc_builder import build_twc
 from utils.twc_io import mcc_obs_encoder, twc_out_2_mcc_action
 import gymnasium as gym
@@ -209,122 +208,143 @@ UPDATE_AFTER      = 5_000
 UPDATE_EVERY      = 1
 NUM_UPDATE_LOOPS  = 1
 EVAL_INTERVAL     = 5_000
-NOISE_STD_INIT    = 0.25
-NOISE_STD_FINAL   = 0.05
-NOISE_DECAY_STEPS = 50_000
+NOISE_STD_INIT    = 0.35
+NOISE_STD_FINAL   = 0.1
+NOISE_DECAY_STEPS = 120_000
 GAMMA, TAU        = 0.99, 0.005
 BATCH_SIZE        = 128
-SEQ_LEN           = 16
+SEQ_LEN           = 24
+BURN_IN           = 8
+UNROLL_K = SEQ_LEN - BURN_IN
 DEVICE            = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 def ddpg_update_step(actor, critic, actor_targ, critic_targ,
-                     actor_opt, critic_opt, batch, grad_clip=None):
-    obs_seq  = batch['obs']   # (B, L, obs_dim)
-    act_seq  = batch['act']   # (B, L, act_dim)
-    rew_seq  = batch['rew']   # (B, L, 1)
-    obs2_seq = batch['obs2']  # (B, L, obs_dim)
-    done_seq = batch['done']  # (B, L, 1)
+                     actor_opt, critic_opt, batch, grad_clip=1.0,
+                     burn_in=8):
+    """
+    DDPG update with truncated BPTT-style unroll for recurrent FIURI actor.
 
-    seq_len = obs_seq.size(1)
-    obs  = obs_seq[:, -1, :]
-    act  = act_seq[:, -1, :]
-    rew  = rew_seq[:, -1, :]
-    obs2 = obs2_seq[:, -1, :]
-    done = done_seq[:, -1, :]
-    batch_size = obs_seq.size(0)
+    burn_in : number of initial steps used to reconstruct hidden state without grad.
+    """
+    obs_seq  = batch['obs']    # (B, L, obs_dim)
+    act_seq  = batch['act']    # (B, L, act_dim)
+    rew_seq  = batch['rew']    # (B, L, 1)
+    obs2_seq = batch['obs2']   # (B, L, obs_dim)
+    done_seq = batch['done']   # (B, L, 1)
+    seq_len  = obs_seq.size(1)
+    unroll_k = seq_len - burn_in
+    B        = obs_seq.size(0)
 
+    # ----------------- Helpers -----------------
     def _snapshot_states(twc_module):
         layers = (twc_module.in_layer, twc_module.hid_layer, twc_module.out_layer)
-        return [
-            (
-                layer.in_state.detach().clone(),
-                layer.out_state.detach().clone(),
-            )
-            for layer in layers
-        ]
+        return [(l.in_state.detach().clone(), l.out_state.detach().clone()) for l in layers]
 
-    def _restore_states(twc_module, snapshot):
-        layers = (twc_module.in_layer, twc_module.hid_layer, twc_module.out_layer)
-        for layer, (in_state, out_state) in zip(layers, snapshot):
-            layer.in_state = in_state.clone()
-            layer.out_state = out_state.clone()
+    def _restore_states(twc_module, snap):
+        for layer, (in_s, out_s) in zip((twc_module.in_layer, twc_module.hid_layer, twc_module.out_layer), snap):
+            layer.in_state, layer.out_state = in_s.clone(), out_s.clone()
         twc_module.detach()
 
     def _reset_twc_state(twc_module, B, device, dtype):
         for layer in (twc_module.in_layer, twc_module.hid_layer, twc_module.out_layer):
             layer.reset_state(B=B, device=device, dtype=dtype)
 
-    # ----- Critic target -----
+    # ======================================================================
+    # 1) Critic target computation (with target actor unroll, no grad)
+    # ======================================================================
     with torch.no_grad():
-        _reset_twc_state(actor_targ.twc, batch_size, obs_seq.device, obs_seq.dtype)
-        for t in range(seq_len):
-            actor_targ(obs_seq[:, t, :])
-        a2 = actor_targ(obs2)
-        q2 = critic_targ(obs2, a2)
-        y  = rew + GAMMA * (1.0 - done) * q2
-        y_mean = float(y.mean().item())
-        y_std  = float(y.std().item())
+        _reset_twc_state(actor_targ.twc, B, obs_seq.device, obs_seq.dtype)
+        for t in range(burn_in):
+            _ = actor_targ(obs_seq[:, t, :])           # burn-in (no grad)
+        y_list = []
+        for t in range(burn_in, seq_len):
+            a2_t = actor_targ(obs2_seq[:, t, :])
+            q2_t = critic_targ(obs2_seq[:, t, :], a2_t)
+            y_t  = rew_seq[:, t, :] + GAMMA * (1.0 - done_seq[:, t, :]) * q2_t
+            y_list.append(y_t)
+        y = torch.stack(y_list, 1)                     # (B, K, 1)
+        y_mean, y_std = float(y.mean()), float(y.std())
 
-    # ----- Critic update -----
+    # ======================================================================
+    # 2) Critic update (average over unroll horizon)
+    # ======================================================================
     critic_opt.zero_grad(set_to_none=True)
-    q   = critic(obs, act)
+    q_list = []
+    for t in range(burn_in, seq_len):
+        q_t = critic(obs_seq[:, t, :], act_seq[:, t, :])
+        q_list.append(q_t)
+    q = torch.stack(q_list, 1)                         # (B, K, 1)
+
     l_q = ((q - y) ** 2).mean()
-    l_q.backward()
+    if torch.isfinite(l_q):
+        l_q.backward()
+        if grad_clip is not None:
+            torch.nn.utils.clip_grad_norm_(critic.parameters(), grad_clip)
+        critic_opt.step()
     critic_grad_norm = _global_grad_norm(critic.parameters())
-    if grad_clip is not None:
-        torch.nn.utils.clip_grad_norm_(critic.parameters(), grad_clip)
-    critic_opt.step()
+    q_mean, q_std = float(q.mean()), float(q.std())
 
-    q_mean = float(q.mean().item())
-    q_std  = float(q.std().item())
-
-    # ----- Actor update -----
-    actor_grad_norm = float('nan')
-    l_pi_value = float('nan')
+    # ======================================================================
+    # 3) Actor update (average Q over unroll horizon)
+    # ======================================================================
     actor_state_snapshot = _snapshot_states(actor.twc)
+    l_pi_value = float('nan')
+    actor_grad_norm = float('nan')
     try:
-        for p in critic.parameters():
-            p.requires_grad_(False)
+        for p in critic.parameters(): p.requires_grad_(False)
 
         actor_opt.zero_grad(set_to_none=True)
-        _reset_twc_state(actor.twc, batch_size, obs_seq.device, obs_seq.dtype)
+        _reset_twc_state(actor.twc, B, obs_seq.device, obs_seq.dtype)
 
-        a_pi = None
-        for t in range(seq_len):
-            a_pi = actor(obs_seq[:, t, :])
-        q_pi = critic(obs, a_pi)
+        # burn-in (no grad)
+        with torch.no_grad():
+            for t in range(burn_in):
+                _ = actor(obs_seq[:, t, :])
+
+        # unroll with grad
+        q_pi_list = []
+        for t in range(burn_in, seq_len):
+            a_pi_t = actor(obs_seq[:, t, :])
+            q_pi_t = critic(obs_seq[:, t, :], a_pi_t)
+            q_pi_list.append(q_pi_t)
+        q_pi = torch.stack(q_pi_list, 1)
         l_pi = -q_pi.mean()
 
-        l_pi.backward()
+        if torch.isfinite(l_pi):
+            l_pi.backward()
+            if grad_clip is not None:
+                torch.nn.utils.clip_grad_norm_(actor.parameters(), grad_clip)
+            actor_opt.step()
+
         actor_grad_norm = _global_grad_norm(actor.parameters())
         l_pi_value = float(l_pi.item())
-        actor_opt.step()
     finally:
         _restore_states(actor.twc, actor_state_snapshot)
-        for p in critic.parameters():
-            p.requires_grad_(True)
+        for p in critic.parameters(): p.requires_grad_(True)
 
-    actor_grad_norm = float(actor_grad_norm)
-
-    # ----- Soft target update -----
+    # ======================================================================
+    # 4) Soft target updates
+    # ======================================================================
     @torch.no_grad()
     def _soft_update(net, targ):
         for p, pt in zip(net.parameters(), targ.parameters()):
             pt.data.mul_(1 - TAU).add_(TAU * p.data)
 
-    _soft_update(actor,  actor_targ)
+    _soft_update(actor, actor_targ)
     _soft_update(critic, critic_targ)
 
-    # ===== LOGGING ADDED: return rich dict =====
+    # ======================================================================
+    # 5) Return metrics for logging
+    # ======================================================================
     return {
-        "loss/critic": float(l_q.item()),
+        "loss/critic": float(l_q.item()) if torch.isfinite(l_q) else float('nan'),
         "loss/actor":  l_pi_value,
         "q/mean":      q_mean,
         "q/std":       q_std,
         "target/mean": y_mean,
         "target/std":  y_std,
-        "grads/critic_global_norm": actor_grad_norm if False else critic_grad_norm,  # keep explicit names below
-        "grads/actor_global_norm":  float(actor_grad_norm),
+        "grads/critic_global_norm": critic_grad_norm,
+        "grads/actor_global_norm":  actor_grad_norm,
     }
 
 
@@ -336,7 +356,7 @@ obs_dim, act_dim = env.observation_space.shape[0], env.action_space.shape[0]
 actor, critic = ActorFIURI(twc).to(DEVICE), CriticQ(obs_dim, act_dim).to(DEVICE)
 actor_targ, critic_targ = deepcopy(actor), deepcopy(critic)
 actor_opt = torch.optim.Adam(actor.parameters(),  lr=1e-4)
-critic_opt= torch.optim.Adam(critic.parameters(), lr=1e-3)
+critic_opt= torch.optim.Adam(critic.parameters(), lr=5e-4)
 buf = ReplayBuffer(obs_dim, act_dim, size=100_000)
 writer = SummaryWriter(log_dir="runs/twc_ddpg")
 
@@ -396,7 +416,7 @@ for t in tqdm(range(TOTAL_STEPS)):
             batch = buf.sample_sequences(BATCH_SIZE, SEQ_LEN, DEVICE)
             metrics = ddpg_update_step(actor, critic,
                                        actor_targ, critic_targ,
-                                       actor_opt, critic_opt, batch)
+                                       actor_opt, critic_opt, batch, burn_in=BURN_IN)
             writer.add_scalar("loss/critic", metrics["loss/critic"], t+1)
             writer.add_scalar("loss/actor",  metrics["loss/actor"],  t+1)
             writer.add_scalar("q/mean",      metrics["q/mean"],      t+1)
@@ -423,17 +443,20 @@ for t in tqdm(range(TOTAL_STEPS)):
     if (t+1) % EVAL_INTERVAL == 0:
         eval_return = evaluate_policy(env, actor, DEVICE)
         print(f"[Eval] step={t+1}  avg_return={eval_return:.2f}")
-        writer.add_scalar("eval/return_mean", eval_return, t+1)   # ===== LOGGING ADDED =====
-    
+        writer.add_scalar("eval/return_mean", eval_return, t+1)
+
+    if (t+1) % (EVAL_INTERVAL//2) == 0:
+        writer.flush()
+
     # === 6. Periodic save ===
     if t % SAVE_EVERY == 0 and t > 0:
         # save actor and critic
-        torch.save(actor.state_dict(),f"twc_actor_{t}.pth")
-        torch.save(critic.state_dict(),f"twc_critic_{t}.pth")
+        torch.save(actor.state_dict(),f"models/twc_actor_ddqn_{t}.pth")
+        torch.save(critic.state_dict(),f"models/twc_critic_ddqn_{t}.pth")
 
 # Final model saves.
-torch.save(actor.state_dict(),f"twc_actor.pth")
-torch.save(critic.state_dict(),f"twc_critic.pth")
+torch.save(actor.state_dict(),f"models/twc_actor_ddqn.pth")
+torch.save(critic.state_dict(),f"models/twc_critic_ddqn.pth")
 
 writer.flush()
 writer.close()

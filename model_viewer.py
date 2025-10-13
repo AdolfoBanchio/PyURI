@@ -1,7 +1,7 @@
 from utils import twc_builder
 import torch
 
-path = "twc_actor_50000.pth"
+path = "twc_ppo_actor_final.pth"
 
 state_dict = torch.load(path)
 
