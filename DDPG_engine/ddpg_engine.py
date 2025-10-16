@@ -5,9 +5,6 @@ import gymnasium as gym
 from tqdm import tqdm
 from copy import deepcopy
 
-def soft_update(self, net: nn.Module, target_net: nn.Module):
-        for param, target_param in zip(net.parameters(), target_net.parameters()):
-            target_param.data.copy_(self.cfg.tau * param.data + (1 - self.cfg.tau) * target_param.data)
 
 class DDPGEngine():
     """  
@@ -50,6 +47,10 @@ class DDPGEngine():
         self.actor_target.to(device)
         self.critic_target.to(device)
         
+    def soft_update(self, net: nn.Module, target_net: nn.Module):
+            for param, target_param in zip(net.parameters(), target_net.parameters()):
+                target_param.data.copy_(self.tau * param.data + (1 - self.tau) * target_param.data)
+    
     def get_action(self, state, action_noise = None):
         """  
         Given a state, compute the action to take according to the current policy.
@@ -107,8 +108,8 @@ class DDPGEngine():
         self.actor_optimizer.step()
 
         # 4. update target networks with soft update
-        self.soft_update(self.actor, self.actor_target)
-        self.soft_update(self.critic, self.critic_target)
+        self.soft_update(net=self.actor, target_net=self.actor_target)
+        self.soft_update(net=self.critic,  target_net=self.critic_target)
 
         return actor_loss.item(), critic_loss.item()
     

@@ -8,25 +8,70 @@ from DDPG_engine.ddpg_engine import DDPGEngine
 from DDPG_engine.replay_buffer import ReplayBuffer
 from utils.MLP_models import Actor, Critic
 from tqdm import tqdm
+from torch.utils.tensorboard import SummaryWriter
+from datetime import datetime
 
-HIDDEN_SIZE = [64, 64] # OPEN AI
+# Algorithm and hyperparams based on
+# https://arxiv.org/pdf/1509.02971
 # --- Environment ---
 ENV = "MountainCarContinuous-v0"
 SEED = 42
 # --- Hyperparameters ---
-TOTAL_STEPS       = 100_000
-SAVE_EVERY        = TOTAL_STEPS // 4
-UPDATE_AFTER      = 5_000
-UPDATE_EVERY      = 1
+MAX_EPISODE = 300
 NUM_UPDATE_LOOPS  = 1
-EVAL_INTERVAL     = 5_000
-NOISE_STD_INIT    = 0.35
-NOISE_STD_FINAL   = 0.1
-NOISE_DECAY_STEPS = 70_000
+WARMUP_STEPS = 3000
+# _________________________
 GAMMA             = 0.99
-TAU               = 0.005
-BATCH_SIZE        = 128
+TAU               = 0.001
+SIGMA_START = 0.99
+SIGMA_END = 0.05
+SIGMA_DECAY_EPIS = 150
+BATCH_SIZE        = 256
+MAX_TIME_STEPS = 1000
+# _________________________
 DEVICE            = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+ACTOR_HID_LAYERS = [400, 300]
+CRITIC_HID_LAYERS= [400, 300]
+CRITIC_LR= 1e-4
+ACTOR_LR = 1e-3
+
+# --- HELPER FUNCTIONS ---
+def sigma_for_episode(ep):
+    frac = min(1.0, ep / SIGMA_DECAY_EPIS)
+    return SIGMA_START + (SIGMA_END - SIGMA_START) * frac
+
+@torch.no_grad()
+def evaluate_policy(env, ddpg: DDPGEngine, episodes=10):
+    total = 0.0
+    for _ in range(episodes):
+        obs, _ = env.reset()
+        done = False
+        while not done:
+            a = ddpg.get_action(obs)
+            obs, r, terminated, truncated, _ = env.step(a)
+            total += r
+            done = terminated or truncated
+    return total / episodes
+
+class OUNoise:
+    def __init__(self,action_dimension,mu=0, theta=0.15, sigma=0.5):
+        self.action_dimension = action_dimension
+        self.mu = mu
+        self.theta = theta
+        self.sigma = sigma
+        self.state = np.ones(self.action_dimension) * self.mu
+        self.reset()
+
+    def reset(self):
+        self.state = np.ones(self.action_dimension) * self.mu
+
+    def noise(self):
+        x = self.state
+        dx = self.theta * (self.mu - x) + self.sigma * np.random.randn(len(x))
+        self.state = x + dx
+        return self.state
+    
+# -------------------------
 
 # Set seeds
 np.random.seed(SEED)
@@ -34,18 +79,22 @@ torch.manual_seed(SEED)
 env = gym.make(ENV)
 env.action_space.seed(SEED)
 
-actor = Actor(hidden_size=HIDDEN_SIZE,
-              num_inputs=env.observation_space.shape[0],
-              action_space=env.action_space)
-critic = Critic(hidden_size=HIDDEN_SIZE,
-                num_inputs=env.observation_space.shape[0],
-                action_space=env.action_space)
+actor = Actor(state_dim=env.observation_space.shape[0],
+              action_dim=env.action_space.shape[0],
+              sizes=ACTOR_HID_LAYERS)
+
+critic = Critic(state_dim=env.observation_space.shape[0],
+                action_dim=env.action_space.shape[0],
+                sizes=CRITIC_HID_LAYERS)
 
 replay_buf = ReplayBuffer(obs_dim=env.observation_space.shape[0],
-                          act_dim=env.action_space.shape[0])
+                          act_dim=env.action_space.shape[0],
+                          size=int(1e6))
 
-actor_opt = torch.optim.Adam(actor.parameters(),  lr=1e-4)
-critic_opt= torch.optim.Adam(critic.parameters(), lr=5e-4)
+ou_noise = OUNoise(action_dimension=env.action_space.shape[0])
+
+actor_opt = torch.optim.Adam(actor.parameters(),  lr=ACTOR_LR)
+critic_opt= torch.optim.Adam(critic.parameters(), lr=CRITIC_LR, weight_decay=1e-2)
 
 ddpg = DDPGEngine(gamma=GAMMA,
                   tau=TAU,
@@ -61,61 +110,64 @@ ddpg = DDPGEngine(gamma=GAMMA,
 obs, _ = env.reset()
 ep_ret, ep_len = 0, 0
 best_ret = -np.inf
+total_steps = 0
+# --- TRAIN LOOP ---
+# Create a unique run directory with timestamp
+run_name = f"mlp_ddpg_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+writer = SummaryWriter(f'runs/{run_name}')
 
-
-def current_noise_std(t):
-    frac = np.clip(t / NOISE_DECAY_STEPS, 0., 1.)
-    return NOISE_STD_INIT + frac * (NOISE_STD_FINAL - NOISE_STD_INIT)
-
-@torch.no_grad()
-def evaluate_policy(env, actor, device, episodes=5):
-    total = 0.0
-    for _ in range(episodes):
-        obs, _ = env.reset()
-        done = False
-        while not done:
-            obs_t = torch.tensor(obs, dtype=torch.float32, device=device).unsqueeze(0)
-            a = ddpg.get_action(obs_t)
-            obs, r, terminated, truncated, _ = env.step(a)
-            total += r
-            done = terminated or truncated
-    return total / episodes
-
-for t in tqdm(range(TOTAL_STEPS)):
-    obs_t = torch.tensor(obs, dtype=torch.float32, device=DEVICE).unsqueeze(0)
-    action = ddpg.get_action(obs_t, action_noise=lambda: np.random.normal(0, current_noise_std(t), size=env.action_space.shape[0]))
-
-    next_obs, r, ter, trunc, _ = env.step(action)
-    done = ter or trunc
-    ep_ret += r
-    ep_len += 1
-    replay_buf.store(obs, action, r, next_obs, done)
-    obs = next_obs
-
-    if t>=UPDATE_AFTER and t % UPDATE_EVERY == 0:
-        for _ in range(NUM_UPDATE_LOOPS):
-            batch = replay_buf.sample(BATCH_SIZE, DEVICE)
-            ddpg.update_step(batch)
-
-    if done:
-        obs, _ = env.reset()
-        if ep_ret > best_ret:
-            best_ret = ep_ret
-        print(f"Episode Return: {ep_ret:.2f} \t Episode Length: {ep_len} \t Best Return: {best_ret:.2f}")
-        ep_ret, ep_len = 0, 0
+for e in tqdm(range(MAX_EPISODE)):
+    obs, _ = env.reset()
+    ep_reward = 0
     
-    if (t+1) % EVAL_INTERVAL == 0:
-        eval_ret = evaluate_policy(env, ddpg.actor, DEVICE)
-        print(f"Evaluation Return: {eval_ret:.2f}")
+    sigma = sigma_for_episode(e)
+    steps = 0
+    for t in range(MAX_TIME_STEPS):
+        action = ddpg.get_action(
+            obs, 
+            action_noise=ou_noise.noise
+        )
 
-    if (t+1) % SAVE_EVERY == 0:
-        torch.save(ddpg.actor.state_dict(), f"ddpg_actor_{t+1}.pth")
-        torch.save(ddpg.critic.state_dict(), f"ddpg_critic_{t+1}.pth")
+        next_obs, reward, terminated, truncated, _ = env.step(action)
+        done = terminated or truncated
+        ep_reward += reward
+        steps += 1
+        
+        replay_buf.store(obs, action, reward, next_obs, done)
+        obs = next_obs
+        total_steps += 1
 
+        if total_steps > WARMUP_STEPS and replay_buf.size >= BATCH_SIZE:
+            for _ in range(NUM_UPDATE_LOOPS):
+                batch = replay_buf.sample(BATCH_SIZE, DEVICE)
+                actor_loss, critic_loss = ddpg.update_step(batch)
+                # Log losses
+                writer.add_scalar('Loss/Actor', actor_loss, total_steps)
+                writer.add_scalar('Loss/Critic', critic_loss, total_steps)
+
+        if done:
+            break
+
+    # Log episode return
+    writer.add_scalar('Training/Episode_Return', ep_reward, e)
+
+    if (e+1) % 10 == 0:
+        eval_ret = evaluate_policy(env, ddpg, episodes=10)
+        # Log evaluation return
+        writer.add_scalar('Evaluation/Return', eval_ret, e)
+        print(f"Evaluation after Episode {e+1}: {eval_ret:.2f}")
+        if eval_ret > best_ret:
+            best_ret = eval_ret
+            torch.save(ddpg.actor.state_dict(), f"models/ddpg_actor_best.pth")
+            torch.save(ddpg.critic.state_dict(), f"models/ddpg_critic_best.pth")
+            print(f"New best evaluation reward: {best_ret:.2f}, models saved.")
 
 print("Training completed.")
-env.close()
 
+env.close()
 # save final models
-torch.save(ddpg.actor.state_dict(), f"ddpg_actor_final.pth")
-torch.save(ddpg.critic.state_dict(), f"ddpg_critic_final.pth")
+torch.save(ddpg.actor.state_dict(), f"models/ddpg_actor_final.pth")
+torch.save(ddpg.critic.state_dict(), f"models/ddpg_critic_final.pth")
+
+# Close tensorboard writer
+writer.close()
