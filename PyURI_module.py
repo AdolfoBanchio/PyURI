@@ -32,13 +32,6 @@ class FIURIModule(nn.Module):
     """  
     Nerual layer of the FIURI model. (fully pytorch)
     Sn = En + sum(I_jin) j=1..m where m is ammount of connections(9) 
-    
-    On = ( Sn- Tn if Sn > Tn 
-         ( 0 other case (10) 
-    
-        | Sn - Tn if Sn > Tn
-    En =  En - dn if Sn ≤ Tn and Sn = En  (11) 
-        \ Sn other case  
          
     Ij in = 
             ωj * Oj if Oj ≥ En y gap junct. 
@@ -46,6 +39,13 @@ class FIURIModule(nn.Module):
             ωj * Oj chemical excitatory 
             -ωj * Oj chemical inhibitory
     where Oj is the output state of the presynaptic neuron j and ωj is the weight of the connection from neuron j to neuron n.
+    
+    On = ( Sn- Tn if Sn > Tn 
+         ( 0 other case (10) 
+    
+        | Sn - Tn if Sn > Tn
+    En =  En - dn if Sn ≤ Tn and Sn = En  (11) 
+        \ Sn other case  
     
     where:
         - En and On represent the internal state and the output state of neuron n, respectively. (not learnable)
@@ -86,8 +86,8 @@ class FIURIModule(nn.Module):
         self.register_buffer("in_state", torch.tensor(initial_in_state, dtype=torch.float32))  # E (batch, n)
         self.register_buffer("out_state", torch.tensor(initial_out_state, dtype=torch.float32))  # O/output (batch, n) — BindsNET convention      
         
-        #self.in_state = torch.tensor(initial_in_state, dtype=torch.float32)
-        #self.out_state = torch.tensor(initial_out_state, dtype=torch.float32)
+        self.in_state = torch.tensor(initial_in_state, dtype=torch.float32, requires_grad=True)
+        self.out_state = torch.tensor(initial_out_state, dtype=torch.float32, requires_grad=True)
         # defaults for initial states (scalars stored just to use at first allocation)
         self._init_E = float(initial_in_state)
         self._init_O = float(initial_out_state)
@@ -160,31 +160,30 @@ class FIURIModule(nn.Module):
         _scatter_add_batched(contrib, dst, out)
         return out  # (B, n)
 
-    def neuron_step(self, S=None):
+    def neuron_step(self, state):
         """
+        DEPRECATED
         Performs one step of the neuron dynamics.
         If S is None, uses S = in_state (i.e., as if input_current were zero).
         """
-        if S is None:
-            S = self.in_state
+        E, O = state if state else (self._init_E, self._init_O)
+        S = torch.clamp(E, self.clamp_min, self.clamp_max)
 
-        # Make sure params are on the same device/dtype as S
-        T = self.threshold.view(1, -1) # treshold can be negative.
-        d = self.decay.view(1, -1) # makes sense to mantain decay factor positive
-
-        eps_abs = 1e-8
-        eps_rel = 1e-6
-        no_stim = (S.abs() <= (eps_abs + eps_rel * (self.in_state.abs() + 1.0)))
+        T = F.softplus(self.threshold)    # differentiable parameters
+        D = F.softplus(self.decay)
+        
+        eps = 1e-6
+        eqE = (S - self.in_state).abs() <= eps
 
         gt = S > T
-        mask = (~gt) & no_stim
+        mask = (~gt) & eqE
+
         new_o = F.softplus(S - T)
-        new_e = torch.where(S > T, new_o, torch.where(mask, self.in_state - d, S))
+        new_e = torch.where(S > T, new_o, torch.where(mask, self.in_state - D, S))
 
-        self.out_state = new_o
-        self.in_state  = new_e
+        return new_o, (new_e, new_o)
 
-    def forward(self, chem_influence, gj_bundle = None, o_pre = None) -> torch.Tensor:
+    def forward(self, chem_influence, state = None, gj_bundle = None, o_pre = None) -> torch.Tensor:
         B = chem_influence.size(0)
         self._ensure_state(B, chem_influence.device, chem_influence.dtype)
         
@@ -192,10 +191,23 @@ class FIURIModule(nn.Module):
             assert o_pre is not None, "o_pre must be provided when gj_bundle is not None"
             gj_sum = self._compute_gj_sum(gj_bundle, o_pre)  # (B, n)
             chem_influence  = chem_influence + gj_sum          # (B, n)
+        
+        E, O = state if state else (self._init_E, self._init_O)
+        S = torch.clamp(E + chem_influence, self.clamp_min, self.clamp_max)
 
-        S = torch.clamp(self.in_state + chem_influence, self.clamp_min, self.clamp_max)
-        self.neuron_step(S=S)
-        return self.out_state, self.in_state
+        T = F.softplus(self.threshold)    # differentiable parameters
+        D = F.softplus(self.decay)
+        
+        eps = 1e-6
+        eqE = (S - self.in_state).abs() <= eps
+
+        gt = S > T
+        mask = (~gt) & eqE
+
+        new_o = F.softplus(S - T)
+        new_e = torch.where(S > T, new_o, torch.where(mask, self.in_state - D, S))
+
+        return new_o, (new_e, new_o)
 
     @torch.no_grad()
     def set_internal_state(
@@ -353,8 +365,9 @@ class FiuriDenseConn(nn.Module):
         Returns:
             weighed presynaptic outputs
         """
-        # Effective weights after masking
-        w_eff = self.w * self.w_mask  # (n_pre, n_post)
+        # Enforce positive weights before applying the mask
+        w_pos = F.softplus(self.w)  # (n_pre, n_post)
+        w_eff = w_pos * self.w_mask  # (n_pre, n_post)
         contrib = o_pre.matmul(w_eff)  # (B, n_post)
         if self.type == "EX":
             return contrib
@@ -385,4 +398,6 @@ class FiuriSparseGJConn(nn.Module):
 
     def forward(self, o_pre):
         # Return bundle
-        return (self.gj_idx[0], self.gj_idx[1], self.gj_w)
+        # Return positive weights to respect GJ constraint
+        w_pos = F.softplus(self.gj_w)
+        return (self.gj_idx[0], self.gj_idx[1], w_pos)

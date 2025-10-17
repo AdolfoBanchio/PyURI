@@ -17,44 +17,39 @@ from datetime import datetime
 ENV = "MountainCarContinuous-v0"
 SEED = 42
 # --- Hyperparameters ---
-MAX_EPISODE = 300
+MAX_EPISODE = 220
 NUM_UPDATE_LOOPS  = 1
 WARMUP_STEPS = 3000
 # _________________________
-GAMMA             = 0.99
-TAU               = 0.001
-SIGMA_START = 0.99
-SIGMA_END = 0.05
-SIGMA_DECAY_EPIS = 150
-BATCH_SIZE        = 256
+GAMMA             = 0.98
+TAU               = 0.00034
+BATCH_SIZE        = 170
 MAX_TIME_STEPS = 1000
 # _________________________
 DEVICE            = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-ACTOR_HID_LAYERS = [400, 300]
-CRITIC_HID_LAYERS= [400, 300]
-CRITIC_LR= 1e-4
-ACTOR_LR = 1e-3
+ACTOR_HID_LAYERS = [64, 128]
+CRITIC_HID_LAYERS= [64, 128]
+CRITIC_LR= 0.00346
+ACTOR_LR = 0.00032
 
 # --- HELPER FUNCTIONS ---
-def sigma_for_episode(ep):
-    frac = min(1.0, ep / SIGMA_DECAY_EPIS)
-    return SIGMA_START + (SIGMA_END - SIGMA_START) * frac
-
 @torch.no_grad()
 def evaluate_policy(env, ddpg: DDPGEngine, episodes=10):
+    ddpg.actor.eval()
     total = 0.0
     for _ in range(episodes):
         obs, _ = env.reset()
         done = False
         while not done:
-            a = ddpg.get_action(obs)
+            a = ddpg.get_action(obs, action_noise=None)
             obs, r, terminated, truncated, _ = env.step(a)
             total += r
             done = terminated or truncated
+    ddpg.actor.train()
     return total / episodes
 
 class OUNoise:
-    def __init__(self,action_dimension,mu=0, theta=0.15, sigma=0.5):
+    def __init__(self,action_dimension,mu=0, theta=0.15, sigma=0.184):
         self.action_dimension = action_dimension
         self.mu = mu
         self.theta = theta
@@ -89,7 +84,7 @@ critic = Critic(state_dim=env.observation_space.shape[0],
 
 replay_buf = ReplayBuffer(obs_dim=env.observation_space.shape[0],
                           act_dim=env.action_space.shape[0],
-                          size=int(1e6))
+                          size=52_000)
 
 ou_noise = OUNoise(action_dimension=env.action_space.shape[0])
 
@@ -118,9 +113,9 @@ writer = SummaryWriter(f'runs/{run_name}')
 
 for e in tqdm(range(MAX_EPISODE)):
     obs, _ = env.reset()
+    ou_noise.reset()
     ep_reward = 0
     
-    sigma = sigma_for_episode(e)
     steps = 0
     for t in range(MAX_TIME_STEPS):
         action = ddpg.get_action(
@@ -150,6 +145,7 @@ for e in tqdm(range(MAX_EPISODE)):
 
     # Log episode return
     writer.add_scalar('Training/Episode_Return', ep_reward, e)
+    writer.add_scalar('Training/Episode_steps', steps, e)
 
     if (e+1) % 10 == 0:
         eval_ret = evaluate_policy(env, ddpg, episodes=10)

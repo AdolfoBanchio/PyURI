@@ -16,7 +16,7 @@ def create_layer(n_neurons) -> FIURIModule:
         initial_in_state=0.0,
         initial_out_state=0.0,
         initial_threshold=0.0,
-        initial_decay=1,
+        initial_decay=0.1,
         clamp_min=-10.0,
         clamp_max=10.0,
     )
@@ -86,7 +86,29 @@ def build_twc(obs_encoder: Callable,
                 "hid": [],
                 "out": [],
             }
+            self._state = None
 
+        def _init_layer_state(self, layer: FIURIModule, batch_size: int, device, dtype):
+            E0 = torch.full((batch_size, layer.num_cells), layer._init_E, device=device, dtype=dtype)
+            O0 = torch.full((batch_size, layer.num_cells), layer._init_O, device=device, dtype=dtype)
+            return (E0, O0)
+
+        def _make_state(self, batch_size: int, device, dtype):
+            return {
+                "in": self._init_layer_state(self.in_layer, batch_size, device, dtype),
+                "hid": self._init_layer_state(self.hid_layer, batch_size, device, dtype),
+                "out": self._init_layer_state(self.out_layer, batch_size, device, dtype),
+            }
+
+        def _ensure_state(self, batch_size: int, device, dtype):
+            if self._state is None:
+                self._state = self._make_state(batch_size, device, dtype)
+                return self._state
+
+            sample_E, _ = self._state["in"]
+            if sample_E.shape[0] != batch_size or sample_E.device != device or sample_E.dtype != dtype:
+                self._state = self._make_state(batch_size, device, dtype)
+            return self._state
 
         def forward(self, x: torch.Tensor) -> torch.Tensor:
             """
@@ -99,28 +121,51 @@ def build_twc(obs_encoder: Callable,
                 n_inputs and device (compatible with utils.twc_io_wrapper.default_obs_encoder).
             """
             device = next(self.parameters()).device
+            if x.device != device:
+                x = x.to(device)
             ex_in, in_in = self.obs_encoder(x, n_inputs=4, device=device)            
-            in_out, _ = self.in_layer(ex_in - in_in)
+            B = ex_in.size(0)
+            dtype = ex_in.dtype
+            state = self._ensure_state(B, device, dtype)
+
+            in_state = state["in"]
+            in_out, new_in_state = self.in_layer(ex_in - in_in, state=in_state)
+            state["in"] = new_in_state
+
+            hid_state = state["hid"]
             hid_out = None
+            
             for _ in range(3):
-                # input -> hidden
                 in2hid_influence = self.in2hid_IN(in_out)
                 in2hid_gj_bundle = self.in2hid_GJ(in_out)
-
-                # hidden -> hidden (one recurrent step)
-                hid_out, _ = self.hid_layer(in2hid_influence, gj_bundle=in2hid_gj_bundle, o_pre=in_out)
+                
+                hid_out, hid_state = self.hid_layer(
+                    in2hid_influence,
+                    state=hid_state,
+                    gj_bundle=in2hid_gj_bundle,
+                    o_pre=in_out,
+                )
                 hid_ex_influence = self.hid_EX(hid_out)
-                hid_in_influence= self.hid_IN(hid_out)
-                hid_out, _ = self.hid_layer(hid_ex_influence + hid_in_influence)
-                self.in_layer.neuron_step()
+                hid_in_influence = self.hid_IN(hid_out)
+                hid_out, hid_state = self.hid_layer(
+                    hid_ex_influence + hid_in_influence,
+                    state=hid_state,
+                )
+                state["hid"] = hid_state
+                # just perform an internal step without external influence
+                in_out, new_in_state = self.in_layer.neuron_step(state=state["in"]) 
+                state["in"] = new_in_state
+
             
             # --- hidden -> output (EX only)
             hid2out_ex_influence = self.hid2out(hid_out)
-            out_state,in_state  = self.out_layer(hid2out_ex_influence)
+            out_state, out_layer_state = self.out_layer(hid2out_ex_influence, state=state["out"])
+            state["out"] = out_layer_state
+            self._state = state
             
             if self.log:
-                self.log_monitor()
-            return out_state
+                self.log_monitor(state)
+            return self.action_decoder(out_state)
         
         def get_action(self, y):
             """  
@@ -134,15 +179,24 @@ def build_twc(obs_encoder: Callable,
                 Resets the state variables for each layer
             """
             self.in_layer.reset_state()
-            self.hid_layer.reset_state() 
-            self.out_layer.reset_state() 
+            self.hid_layer.reset_state()
+            self.out_layer.reset_state()
+            param = next(self.parameters())
+            device = param.device
+            dtype = param.dtype
+            self._state = self._make_state(batch_size=1, device=device, dtype=dtype)
         
         def detach(self):
             self.in_layer.detach()
             self.hid_layer.detach()
             self.out_layer.detach()
+            if self._state is not None:
+                self._state = {
+                    name: (state_pair[0].detach(), state_pair[1].detach())
+                    for name, state_pair in self._state.items()
+                }
 
-        def log_monitor(self):
+        def log_monitor(self, state):
             """  
             In each layer list logs a dictonary like this
             {
@@ -152,9 +206,17 @@ def build_twc(obs_encoder: Callable,
             "decay_factor": self.decay,
             }
             """
-            self.monitor["in"].append(self.in_layer.get_state())
-            self.monitor["hid"].append(self.hid_layer.get_state())
-            self.monitor["out"].append(self.out_layer.get_state())
+            def _pack(layer, state_pair):
+                return {
+                    "in_state": state_pair[0].detach().cpu(),
+                    "out_state": state_pair[1].detach().cpu(),
+                    "threshold": layer.threshold.detach().cpu(),
+                    "decay_factor": layer.decay.detach().cpu(),
+                }
+
+            self.monitor["in"].append(_pack(self.in_layer, state["in"]))
+            self.monitor["hid"].append(_pack(self.hid_layer, state["hid"]))
+            self.monitor["out"].append(_pack(self.out_layer, state["out"]))
 
 
     return TWC()

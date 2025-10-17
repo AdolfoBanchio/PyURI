@@ -10,6 +10,7 @@ MIN_STATE, MAX_STATE = -10,10
 
 POS_VALLEY_VAL = -0.3
 VEL_VALLEY_VAL = 0.0
+SMOOTH_GATE_SHARPNESS = 8.0
 
 def mcc_obs_encoder(obs: torch.Tensor, n_inputs=4, device=None):
     """
@@ -26,14 +27,22 @@ def mcc_obs_encoder(obs: torch.Tensor, n_inputs=4, device=None):
     pos_mask = pos >= POS_VALLEY_VAL
     cor_pos = torch.where(pos_mask, pos / POS_MAX, pos / POS_MIN)
     pos_pot = (MAX_STATE - MIN_STATE) * cor_pos + MIN_STATE
+
     PLM_EX_input = torch.where(pos_mask, pos_pot, min_fill)
     AVM_IN_input = torch.where(pos_mask, min_fill, pos_pot)
+    #pos_gate = torch.sigmoid((pos - POS_VALLEY_VAL) * SMOOTH_GATE_SHARPNESS)
+    #PLM_EX_input = pos_gate * pos_pot + (1 - pos_gate) * min_fill
+    #AVM_IN_input = (1 - pos_gate) * pos_pot + pos_gate * min_fill
 
     vel_mask = vel >= VEL_VALLEY_VAL
     cor_vel = torch.where(vel_mask, vel / VEL_MAX, vel / -VEL_MAX)
     vel_pot = (MAX_STATE - MIN_STATE) * cor_vel + MIN_STATE
+    
     ALM_EX_input = torch.where(vel_mask, vel_pot, min_fill)
     PVD_IN_input = torch.where(vel_mask, min_fill, vel_pot)
+    #vel_gate = torch.sigmoid((vel - VEL_VALLEY_VAL) * SMOOTH_GATE_SHARPNESS)
+    #ALM_EX_input = vel_gate * vel_pot + (1 - vel_gate) * min_fill
+    #PVD_IN_input = (1 - vel_gate) * vel_pot + vel_gate * min_fill
     
     zero = torch.zeros_like(pos, device=device)
 
@@ -74,3 +83,12 @@ def twc_out_2_mcc_drive(y: torch.Tensor, fwd_idx: int = 1, rev_idx: int = 0, gai
     """
     drive = gain * (y[:, fwd_idx] - y[:, rev_idx])
     return drive.unsqueeze(1)
+
+
+def twc_out_2_mcc_action_tanh(y: torch.Tensor, fwd_idx: int = 1, rev_idx: int = 0, gain: float = 1.0) -> torch.Tensor:
+    """
+    y: (B, 2) out-layer activations.
+    Returns: (B, 1) torque in [-1, 1] with tanh saturation applied to the drive.
+    """
+    drive = gain * (y[:, fwd_idx] - y[:, rev_idx])
+    return torch.tanh(drive).unsqueeze(1)

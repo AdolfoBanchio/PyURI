@@ -2,7 +2,7 @@ import numpy as np
 import torch
 
 class ReplayBuffer:
-    def __init__(self, obs_dim, act_dim, size=int(1e6)):
+    def __init__(self, obs_dim, act_dim, size=1e6):
         self.obs = np.zeros((size, obs_dim), dtype=np.float32)
         self.act = np.zeros((size, act_dim), dtype=np.float32)
         self.rew = np.zeros((size, 1),       dtype=np.float32)

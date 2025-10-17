@@ -1,466 +1,177 @@
-from utils.twc_builder import build_twc
-from utils.twc_io import mcc_obs_encoder, twc_out_2_mcc_action
 import gymnasium as gym
+import numpy as np
 import torch
 import torch.nn as nn
-from copy import deepcopy
-import numpy as np
-from collections import deque
-from torch.utils.tensorboard import SummaryWriter
+import torch.optim as optim
+import torch.nn.functional as F
+from DDPG_engine.ddpg_engine import DDPGEngine
+from DDPG_engine.replay_buffer import ReplayBuffer
+from utils.MLP_models import Critic
+from utils.twc_builder import build_twc
+from utils.twc_io import twc_out_2_mcc_action, mcc_obs_encoder, twc_out_2_mcc_action_tanh
 from tqdm import tqdm
+from torch.utils.tensorboard import SummaryWriter
+from datetime import datetime
 
-
-def _global_grad_norm(params):
-    total = 0.0
-    for p in params:
-        if p.grad is not None:
-            g = p.grad.detach()
-            total += (g * g).sum().item()
-    return float(total ** 0.5)
-
-# 
-twc = build_twc(obs_encoder=mcc_obs_encoder,
-                action_decoder=twc_out_2_mcc_action,
-                log_stats=False)
-
-# 
-class ActorFIURI(nn.Module):
-    def __init__(self, twc_module):  # your nn.Module that implements FIURI/TWC
-        super().__init__()
-        self.twc = twc_module
-
-    def forward(self, obs):
-        # obs: (B, obs_dim). Make sure your twc uses the training-time decoder (no @torch.no_grad)
-        y = self.twc(obs)                  # (B, 2) [REV, FWD]
-        a = self.twc.get_action(y)      # (B, 1) torque in [-1, 1]
-        return a
-
-# 
-class CriticQ(nn.Module):
-    def __init__(self, obs_dim, act_dim):
-        super().__init__()
-        self.q = nn.Sequential(
-            nn.Linear(obs_dim + act_dim, 256), nn.ReLU(),
-            nn.Linear(256, 256), nn.ReLU(),
-            nn.Linear(256, 1)
-        )
-        # optional: small init on last layer
-        nn.init.uniform_(self.q[-1].weight, -3e-3, 3e-3)
-        nn.init.uniform_(self.q[-1].bias,   -3e-3, 3e-3)
-
-    def forward(self, obs, act):
-        x = torch.cat([obs, act], dim=-1)
-        return self.q(x)  # (B, 1)
-
-
-# [markdown]
-# In DDPG, each learnable model (actor and critic) has two versions: a main (online) network and a target network. The main networks are the ones being actively trained — the actor learns how to select actions, and the critic learns to evaluate them. The target networks serve only to compute stable bootstrapped targets during training. To keep learning stable, the target networks are softly updated after each training step using the rule
-# 
-# $$ 
-# \theta^{-} \leftarrow (1 - \tau)\theta^{-} + \tau \cdot \theta^{-}
-# $$
-# 
-# where $\tau$ is a small constant (e.g., 0.005). This soft update makes the target parameters slowly track the main networks, smoothing out rapid changes and preventing divergence. During evaluation or deployment, only the main actor is used to generate actions — the target networks exist purely to stabilize the learning process.
-
-#  [markdown]
-# Off-policy data & the Replay Buffer
-# 
-# What it is: a big circular memory that stores past experience tuples so you can train from randomized mini-batches instead of the last on-policy rollouts only.
-# 
-# Why it matters: breaks temporal correlations, improves sample efficiency (you reuse data many times), and stabilizes training.
-# 
-# What you store (per step): (s,a,r,s,d)
-# 
-# Terminal handling: when computing targets later, multiply by (1−d) so you don’t bootstrap past terminal states.
-
-# 
-class ReplayBuffer:
-    def __init__(self, obs_dim, act_dim, size=int(1e6)):
-        self.obs = np.zeros((size, obs_dim), dtype=np.float32)
-        self.act = np.zeros((size, act_dim), dtype=np.float32)
-        self.rew = np.zeros((size, 1),       dtype=np.float32)
-        self.obs2= np.zeros((size, obs_dim), dtype=np.float32)
-        self.done= np.zeros((size, 1),       dtype=np.float32)
-        self.max_size, self.ptr, self.size = size, 0, 0
-
-    def store(self, s, a, r, s2, d):
-        self.obs[self.ptr]  = s
-        self.act[self.ptr]  = a
-        self.rew[self.ptr]  = r
-        self.obs2[self.ptr] = s2
-        self.done[self.ptr] = d
-        self.ptr = (self.ptr + 1) % self.max_size
-        self.size = min(self.size + 1, self.max_size)
-
-    def sample(self, batch_size, device):
-        idx = np.random.randint(0, self.size, size=batch_size)
-        batch = dict(
-            obs  = torch.as_tensor(self.obs[idx],  device=device),
-            act  = torch.as_tensor(self.act[idx],  device=device),
-            rew  = torch.as_tensor(self.rew[idx],  device=device),
-            obs2 = torch.as_tensor(self.obs2[idx], device=device),
-            done = torch.as_tensor(self.done[idx], device=device),
-        )
-        return batch
-
-    def _idx_at(self, i: int) -> int:
-        """
-        Translate a logical index (0 = oldest sample) to the underlying ring-buffer slot.
-        """
-        if self.size == 0:
-            raise IndexError("ReplayBuffer is empty")
-        return (self.ptr - self.size + i) % self.max_size
-
-    def sample_sequences(self, batch_size, seq_len, device):
-        """
-        Return batches of sequential transitions with shape:
-          obs  : (B, seq_len, obs_dim)
-          act  : (B, seq_len, act_dim)
-          rew  : (B, seq_len, 1)
-          obs2 : (B, seq_len, obs_dim)
-          done : (B, seq_len, 1)
-
-        Sequences are guaranteed not to cross episode boundaries: any `done`
-        flag can only appear on the last element of the sequence.
-        """
-        if self.size < seq_len:
-            raise ValueError(f"Not enough samples ({self.size}) to draw sequences of length {seq_len}")
-
-        obs_batch = []
-        act_batch = []
-        rew_batch = []
-        obs2_batch = []
-        done_batch = []
-
-        max_start = self.size - seq_len
-        attempts = 0
-        max_attempts = batch_size * 50
-
-        while len(obs_batch) < batch_size:
-            if attempts >= max_attempts:
-                raise RuntimeError(
-                    "Unable to sample sequential batches without crossing episode boundaries. "
-                    "Consider reducing seq_len or ensuring adequate replay data."
-                )
-            start = np.random.randint(0, max_start + 1)
-            idxs = [self._idx_at(start + offset) for offset in range(seq_len)]
-            # Prevent sequences that cross terminals except possibly on last element.
-            if np.any(self.done[idxs[:-1]] > 0.5):
-                attempts += 1
-                continue
-
-            obs_batch.append(self.obs[idxs])
-            act_batch.append(self.act[idxs])
-            rew_batch.append(self.rew[idxs])
-            obs2_batch.append(self.obs2[idxs])
-            done_batch.append(self.done[idxs])
-
-        obs_arr  = torch.as_tensor(np.stack(obs_batch,  axis=0), device=device)
-        act_arr  = torch.as_tensor(np.stack(act_batch,  axis=0), device=device)
-        rew_arr  = torch.as_tensor(np.stack(rew_batch,  axis=0), device=device)
-        obs2_arr = torch.as_tensor(np.stack(obs2_batch, axis=0), device=device)
-        done_arr = torch.as_tensor(np.stack(done_batch, axis=0), device=device)
-
-        return {
-            "obs": obs_arr,
-            "act": act_arr,
-            "rew": rew_arr,
-            "obs2": obs2_arr,
-            "done": done_arr,
-        }
-
-#  [markdown]
-# Exploration Noise (action-space)
-# 
-# actor is deterministic. Without noise, you’ll stick to whatever the current policy outputs and never discover better actions.
-# 
-# How to apply: during data collection only, add noise to the actor’s action before stepping the env, then clip to bounds (e.g., [-1,1] torque). Disable noise during evaluation and when computing targets.
-# 
-# In DDQN there are two common choices Gaussian Noise or Ornstein–Uhlenbeck (OU) noise (time-correlated).
-
-# 
-def add_gaussian_noise(a, std=0.2, low=-1.0, high=1.0):
-    noise = torch.randn_like(a) * std
-    return torch.clamp(a + noise, low, high)
-
-
-class OUNoise:
-    def __init__(self, act_dim, theta=0.15, sigma=0.2, mu=0.0):
-        self.theta, self.sigma = theta, sigma
-        self.mu = mu
-        self.state = np.zeros(act_dim, dtype=np.float32)
-
-    def reset(self): self.state[:] = 0.0
-    
-    def __call__(self):
-        dx = self.theta * (self.mu - self.state) + self.sigma * np.random.randn(*self.state.shape)
-        self.state += dx
-        return self.state.copy()
-
-#  [markdown]
-# Lets start with the training algorithm, first some warmup data must be collected from the enviroment.
-
-# 
+# Algorithm and hyperparams based on
+# https://arxiv.org/pdf/1509.02971
+# --- Environment ---
+ENV = "MountainCarContinuous-v0"
+SEED = 42
 # --- Hyperparameters ---
-TOTAL_STEPS       = 200_000
-SAVE_EVERY        = TOTAL_STEPS // 4
-UPDATE_AFTER      = 5_000
-UPDATE_EVERY      = 1
+MAX_EPISODE = 220
 NUM_UPDATE_LOOPS  = 1
-EVAL_INTERVAL     = 5_000
-NOISE_STD_INIT    = 0.35
-NOISE_STD_FINAL   = 0.1
-NOISE_DECAY_STEPS = 120_000
-GAMMA, TAU        = 0.99, 0.005
-BATCH_SIZE        = 128
-SEQ_LEN           = 24
-BURN_IN           = 8
-UNROLL_K = SEQ_LEN - BURN_IN
+WARMUP_STEPS = 3000
+# _________________________
+GAMMA             = 0.99
+TAU               = 0.0005
+BATCH_SIZE        = 64
+MAX_TIME_STEPS = 1000
+# _________________________
 DEVICE            = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+CRITIC_HID_LAYERS= [400, 300]
+CRITIC_LR= 1e-3
+ACTOR_LR = 1e-4
 
-def ddpg_update_step(actor, critic, actor_targ, critic_targ,
-                     actor_opt, critic_opt, batch, grad_clip=1.0,
-                     burn_in=8):
-    """
-    DDPG update with truncated BPTT-style unroll for recurrent FIURI actor.
-
-    burn_in : number of initial steps used to reconstruct hidden state without grad.
-    """
-    obs_seq  = batch['obs']    # (B, L, obs_dim)
-    act_seq  = batch['act']    # (B, L, act_dim)
-    rew_seq  = batch['rew']    # (B, L, 1)
-    obs2_seq = batch['obs2']   # (B, L, obs_dim)
-    done_seq = batch['done']   # (B, L, 1)
-    seq_len  = obs_seq.size(1)
-    unroll_k = seq_len - burn_in
-    B        = obs_seq.size(0)
-
-    # ----------------- Helpers -----------------
-    def _snapshot_states(twc_module):
-        layers = (twc_module.in_layer, twc_module.hid_layer, twc_module.out_layer)
-        return [(l.in_state.detach().clone(), l.out_state.detach().clone()) for l in layers]
-
-    def _restore_states(twc_module, snap):
-        for layer, (in_s, out_s) in zip((twc_module.in_layer, twc_module.hid_layer, twc_module.out_layer), snap):
-            layer.in_state, layer.out_state = in_s.clone(), out_s.clone()
-        twc_module.detach()
-
-    def _reset_twc_state(twc_module, B, device, dtype):
-        for layer in (twc_module.in_layer, twc_module.hid_layer, twc_module.out_layer):
-            layer.reset_state(B=B, device=device, dtype=dtype)
-
-    # ======================================================================
-    # 1) Critic target computation (with target actor unroll, no grad)
-    # ======================================================================
-    with torch.no_grad():
-        _reset_twc_state(actor_targ.twc, B, obs_seq.device, obs_seq.dtype)
-        for t in range(burn_in):
-            _ = actor_targ(obs_seq[:, t, :])           # burn-in (no grad)
-        y_list = []
-        for t in range(burn_in, seq_len):
-            a2_t = actor_targ(obs2_seq[:, t, :])
-            q2_t = critic_targ(obs2_seq[:, t, :], a2_t)
-            y_t  = rew_seq[:, t, :] + GAMMA * (1.0 - done_seq[:, t, :]) * q2_t
-            y_list.append(y_t)
-        y = torch.stack(y_list, 1)                     # (B, K, 1)
-        y_mean, y_std = float(y.mean()), float(y.std())
-
-    # ======================================================================
-    # 2) Critic update (average over unroll horizon)
-    # ======================================================================
-    critic_opt.zero_grad(set_to_none=True)
-    q_list = []
-    for t in range(burn_in, seq_len):
-        q_t = critic(obs_seq[:, t, :], act_seq[:, t, :])
-        q_list.append(q_t)
-    q = torch.stack(q_list, 1)                         # (B, K, 1)
-
-    l_q = ((q - y) ** 2).mean()
-    if torch.isfinite(l_q):
-        l_q.backward()
-        if grad_clip is not None:
-            torch.nn.utils.clip_grad_norm_(critic.parameters(), grad_clip)
-        critic_opt.step()
-    critic_grad_norm = _global_grad_norm(critic.parameters())
-    q_mean, q_std = float(q.mean()), float(q.std())
-
-    # ======================================================================
-    # 3) Actor update (average Q over unroll horizon)
-    # ======================================================================
-    actor_state_snapshot = _snapshot_states(actor.twc)
-    l_pi_value = float('nan')
-    actor_grad_norm = float('nan')
-    try:
-        for p in critic.parameters(): p.requires_grad_(False)
-
-        actor_opt.zero_grad(set_to_none=True)
-        _reset_twc_state(actor.twc, B, obs_seq.device, obs_seq.dtype)
-
-        # burn-in (no grad)
-        with torch.no_grad():
-            for t in range(burn_in):
-                _ = actor(obs_seq[:, t, :])
-
-        # unroll with grad
-        q_pi_list = []
-        for t in range(burn_in, seq_len):
-            a_pi_t = actor(obs_seq[:, t, :])
-            q_pi_t = critic(obs_seq[:, t, :], a_pi_t)
-            q_pi_list.append(q_pi_t)
-        q_pi = torch.stack(q_pi_list, 1)
-        l_pi = -q_pi.mean()
-
-        if torch.isfinite(l_pi):
-            l_pi.backward()
-            if grad_clip is not None:
-                torch.nn.utils.clip_grad_norm_(actor.parameters(), grad_clip)
-            actor_opt.step()
-
-        actor_grad_norm = _global_grad_norm(actor.parameters())
-        l_pi_value = float(l_pi.item())
-    finally:
-        _restore_states(actor.twc, actor_state_snapshot)
-        for p in critic.parameters(): p.requires_grad_(True)
-
-    # ======================================================================
-    # 4) Soft target updates
-    # ======================================================================
-    @torch.no_grad()
-    def _soft_update(net, targ):
-        for p, pt in zip(net.parameters(), targ.parameters()):
-            pt.data.mul_(1 - TAU).add_(TAU * p.data)
-
-    _soft_update(actor, actor_targ)
-    _soft_update(critic, critic_targ)
-
-    # ======================================================================
-    # 5) Return metrics for logging
-    # ======================================================================
-    return {
-        "loss/critic": float(l_q.item()) if torch.isfinite(l_q) else float('nan'),
-        "loss/actor":  l_pi_value,
-        "q/mean":      q_mean,
-        "q/std":       q_std,
-        "target/mean": y_mean,
-        "target/std":  y_std,
-        "grads/critic_global_norm": critic_grad_norm,
-        "grads/actor_global_norm":  actor_grad_norm,
-    }
-
-
-
-# 
-# --- Env & Networks ---
-env = gym.make("MountainCarContinuous-v0")
-obs_dim, act_dim = env.observation_space.shape[0], env.action_space.shape[0]
-actor, critic = ActorFIURI(twc).to(DEVICE), CriticQ(obs_dim, act_dim).to(DEVICE)
-actor_targ, critic_targ = deepcopy(actor), deepcopy(critic)
-
-actor_targ.to(DEVICE)
-critic_targ.to(DEVICE)
-
-actor_opt = torch.optim.Adam(actor.parameters(),  lr=1e-4)
-critic_opt= torch.optim.Adam(critic.parameters(), lr=5e-4)
-buf = ReplayBuffer(obs_dim, act_dim, size=100_000)
-writer = SummaryWriter(log_dir="runs/twc_ddpg")
-
-# --- Helper for noise decay ---
-def current_noise_std(t):
-    frac = np.clip(t / NOISE_DECAY_STEPS, 0., 1.)
-    return NOISE_STD_INIT + frac * (NOISE_STD_FINAL - NOISE_STD_INIT)
+# --- HELPER FUNCTIONS ---
+def sigma_for_episode(ep, start=0.30, end=0.05, decay_episodes=120):
+    frac = min(1.0, ep / decay_episodes)
+    return start + (end - start) * frac
 
 @torch.no_grad()
-def evaluate_policy(env, actor, device, episodes=5):
+def evaluate_policy(env, ddpg: DDPGEngine, episodes=10):
+    ddpg.actor.eval()
     total = 0.0
     for _ in range(episodes):
         obs, _ = env.reset()
-        actor.twc.reset()
+        ddpg.actor.reset()
         done = False
         while not done:
-            obs_t = torch.tensor(obs, dtype=torch.float32, device=device).unsqueeze(0)
-            a = actor(obs_t).cpu().numpy()[0]
+            a = ddpg.get_action(obs, action_noise=None)
             obs, r, terminated, truncated, _ = env.step(a)
             total += r
             done = terminated or truncated
+    ddpg.actor.train()
     return total / episodes
 
-obs, _ = env.reset(seed=42)
-episode_reward, episode_len = 0.0, 0
-returns_window = deque(maxlen=10)
+class OUNoise:
+    def __init__(self,action_dimension,mu=0, theta=0.15, sigma=0.2):
+        self.action_dimension = action_dimension
+        self.mu = mu
+        self.theta = theta
+        self.sigma = sigma
+        self.state = np.ones(self.action_dimension) * self.mu
+        self.reset()
 
-for t in tqdm(range(TOTAL_STEPS)):
-    # === 1. Action selection ===
-    obs_t = torch.tensor(obs, dtype=torch.float32, device=DEVICE).unsqueeze(0)
-    with torch.no_grad():
-        a = actor(obs_t).cpu().numpy()[0]
+    def reset(self):
+        self.state = np.ones(self.action_dimension) * self.mu
+
+    def noise(self):
+        x = self.state
+        dx = self.theta * (self.mu - x) + self.sigma * np.random.randn(len(x))
+        self.state = x + dx
+        return self.state
+    
+# -------------------------
+
+# Set seeds
+np.random.seed(SEED)
+torch.manual_seed(SEED)
+env = gym.make(ENV)
+env.action_space.seed(SEED)
+
+actor = build_twc(obs_encoder=mcc_obs_encoder,
+                  action_decoder=twc_out_2_mcc_action,
+                  log_stats=False)
+
+critic = Critic(state_dim=env.observation_space.shape[0],
+                action_dim=env.action_space.shape[0],
+                sizes=CRITIC_HID_LAYERS)
+
+replay_buf = ReplayBuffer(obs_dim=env.observation_space.shape[0],
+                          act_dim=env.action_space.shape[0],
+                          size=52_000)
+
+ou_noise = OUNoise(action_dimension=env.action_space.shape[0])
+
+actor_opt = torch.optim.Adam(actor.parameters(),  lr=ACTOR_LR)
+critic_opt= torch.optim.Adam(critic.parameters(), lr=CRITIC_LR, weight_decay=1e-2)
+
+ddpg = DDPGEngine(gamma=GAMMA,
+                  tau=TAU,
+                  observation_space=env.observation_space,
+                  action_space=env.action_space,
+                  actor=actor,
+                  critic=critic,
+                  actor_optimizer=actor_opt,
+                  critic_optimizer=critic_opt,
+                  device=DEVICE)
+
+
+obs, _ = env.reset()
+ep_ret, ep_len = 0, 0
+best_ret = -np.inf
+total_steps = 0
+# --- TRAIN LOOP ---
+# Create a unique run directory with timestamp
+run_name = f"twc_ddpg_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+writer = SummaryWriter(f'runs/{run_name}')
+
+for e in tqdm(range(MAX_EPISODE)):
+    ddpg.actor.reset()
+    obs, _ = env.reset()
+    ou_noise.sigma = sigma_for_episode(e)
+    ou_noise.reset()
+    ep_reward = 0
+    steps = 0
+
+    for t in range(MAX_TIME_STEPS):
+        if total_steps < WARMUP_STEPS:
+            action = env.action_space.sample()
+        else:
+            action = ddpg.get_action(obs, action_noise=ou_noise.noise)
+
+        next_obs, reward, terminated, truncated, _ = env.step(action)
+        done = terminated or truncated
+        ep_reward += reward
+        steps += 1
         
-    sigma = current_noise_std(t)
-    noise = np.random.normal(0, current_noise_std(t), size=a.shape)
-    a_env = np.clip(a + noise, -1.0, 1.0)
+        replay_buf.store(obs, action, reward, next_obs, done)
+        obs = next_obs
+        total_steps += 1
 
-    # logging
-    writer.add_scalar("data/noise_std", sigma, t+1)
-    writer.add_scalar("data/action_noisy_mean", float(np.mean(a_env)), t+1)
-    writer.add_scalar("data/action_noisy_std",  float(np.std(a_env)),  t+1)
+        if total_steps > WARMUP_STEPS and replay_buf.size >= BATCH_SIZE:
+            for _ in range(NUM_UPDATE_LOOPS):
+                batch = replay_buf.sample(BATCH_SIZE, DEVICE)
+                actor_loss, critic_loss = ddpg.update_step(batch)
+                # Log losses
+                writer.add_scalar('Loss/Actor', actor_loss, total_steps)
+                writer.add_scalar('Loss/Critic', critic_loss, total_steps)
 
-    # === 2. Environment step ===
-    next_obs, r, terminated, truncated, _ = env.step(a_env)
-    done = float(terminated or truncated)
-    buf.store(obs, a_env, r, next_obs, done)
+        if done:
+            break
 
-    writer.add_scalar("data/buffer_fill_pct", 100.0 * buf.size / buf.max_size, t+1)
+    # Log episode return
+    writer.add_scalar('Training/Episode_Return', ep_reward, e)
+    writer.add_scalar('Training/Episode_steps', steps, e)
 
-    episode_reward += r
-    episode_len += 1
-    obs = next_obs
+    if (e+1) % 10 == 0:
+        eval_ret = evaluate_policy(env, ddpg, episodes=10)
+        # Log evaluation return
+        writer.add_scalar('Evaluation/Return', eval_ret, e)
+        print(f"Evaluation after Episode {e+1}: {eval_ret:.2f}")
+        if eval_ret > best_ret:
+            best_ret = eval_ret
+            torch.save(ddpg.actor.state_dict(), f"models/ddpg_twc_best.pth")
+            torch.save(ddpg.critic.state_dict(), f"models/ddpg_twc_critic_best.pth")
+            print(f"New best evaluation reward: {best_ret:.2f}, models saved.")
 
-    # === 3. Learn ===
-    if t >= UPDATE_AFTER and t % UPDATE_EVERY == 0:
-        for _ in range(NUM_UPDATE_LOOPS):
-            batch = buf.sample_sequences(BATCH_SIZE, SEQ_LEN, DEVICE)
-            metrics = ddpg_update_step(actor, critic,
-                                       actor_targ, critic_targ,
-                                       actor_opt, critic_opt, batch, burn_in=BURN_IN)
-            writer.add_scalar("loss/critic", metrics["loss/critic"], t+1)
-            writer.add_scalar("loss/actor",  metrics["loss/actor"],  t+1)
-            writer.add_scalar("q/mean",      metrics["q/mean"],      t+1)
-            writer.add_scalar("q/std",       metrics["q/std"],       t+1)
-            writer.add_scalar("target/mean", metrics["target/mean"], t+1)
-            writer.add_scalar("target/std",  metrics["target/std"],  t+1)
-            writer.add_scalar("grads/critic_global_norm", metrics["grads/critic_global_norm"], t+1)
-            writer.add_scalar("grads/actor_global_norm",  metrics["grads/actor_global_norm"],  t+1)
+print("Training completed.")
 
+env.close()
+# save final models
+torch.save(ddpg.actor.state_dict(), f"models/ddpg_twc_final.pth")
+torch.save(ddpg.critic.state_dict(), f"models/ddpg_twc_critic_final.pth")
 
-    # === 4. Episode end ===
-    if done:
-        returns_window.append(episode_reward)
-        writer.add_scalar("episode/return", episode_reward, t+1)
-        writer.add_scalar("episode/length", episode_len,    t+1)
-        if len(returns_window) == returns_window.maxlen:
-            writer.add_scalar("episode/return_avg10", float(np.mean(returns_window)), t+1)
-
-        obs, _ = env.reset()
-        actor.twc.reset()
-        episode_reward, episode_len = 0.0, 0
-
-    # === 5. Periodic evaluation ===
-    if (t+1) % EVAL_INTERVAL == 0:
-        eval_return = evaluate_policy(env, actor, DEVICE)
-        print(f"[Eval] step={t+1}  avg_return={eval_return:.2f}")
-        writer.add_scalar("eval/return_mean", eval_return, t+1)
-
-    if (t+1) % (EVAL_INTERVAL//2) == 0:
-        writer.flush()
-
-    # === 6. Periodic save ===
-    if t % SAVE_EVERY == 0 and t > 0:
-        # save actor and critic
-        torch.save(actor.state_dict(),f"models/twc_actor_ddqn_{t}.pth")
-        torch.save(critic.state_dict(),f"models/twc_critic_ddqn_{t}.pth")
-
-# Final model saves.
-torch.save(actor.state_dict(),f"models/twc_actor_ddqn.pth")
-torch.save(critic.state_dict(),f"models/twc_critic_ddqn.pth")
-
-writer.flush()
+# Close tensorboard writer
 writer.close()

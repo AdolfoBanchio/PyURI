@@ -61,10 +61,9 @@ class DDPGEngine():
         self.actor.eval()
         with torch.no_grad():
             action = self.actor(state).cpu().numpy().flatten()
-        
         self.actor.train()
         if action_noise is not None:
-            action += action_noise()
+            action += action_noise() * 0.5 *( self.act_space.high[0] - self.act_space.low[0])
         
         return np.clip(action, self.act_space.low[0], self.act_space.high[0])
     
@@ -93,10 +92,11 @@ class DDPGEngine():
 
         # 2. update Q-function (critic) by one step of gradient descent
         q_current = self.critic(obs, act)
-        critic_loss = nn.MSELoss()(q_current, q_target)
+        critic_loss = nn.functional.smooth_l1_loss(q_current, q_target)
         
         self.critic_optimizer.zero_grad()
         critic_loss.backward()
+        #torch.nn.utils.clip_grad_norm_(self.critic.parameters(), 1.0)
         self.critic_optimizer.step()
 
         # 3. update policy (actor) by one step of gradient ascent
@@ -105,6 +105,7 @@ class DDPGEngine():
 
         self.actor_optimizer.zero_grad()
         actor_loss.backward()
+        #torch.nn.utils.clip_grad_norm_(self.actor.parameters(), 1.0)
         self.actor_optimizer.step()
 
         # 4. update target networks with soft update
