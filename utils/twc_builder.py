@@ -135,7 +135,7 @@ def build_twc(obs_encoder: Callable,
             hid_state = state["hid"]
             hid_out = None
             
-            for _ in range(3):
+            for _ in range(1):
                 in2hid_influence = self.in2hid_IN(in_out)
                 in2hid_gj_bundle = self.in2hid_GJ(in_out)
                 

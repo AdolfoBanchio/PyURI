@@ -9,15 +9,7 @@ from copy import deepcopy
 class DDPGEngine():
     """  
     TODO: UPDATE DOCSTRING
-    This class functions as a helper to train any actor-critic model with DDPG.
-    All objetcts must be already initialized before being passed to the engine.
-    Parameters:
-        - actor: nn.Module, the policy network.
-        - critic: nn.Module, the Q-value network.
-        - replay_buffer: ReplayBuffer, the experience replay buffer.
-        - actor_optimizer: torch.optim.Optimizer, optimizer for the actor network.
-        - critic_optimizer: torch.optim.Optimizer, optimizer for the critic network.
-        - device: torch.device, device to run the computations on.
+    
     """
     def __init__(self,
                  gamma: float,
@@ -46,27 +38,27 @@ class DDPGEngine():
         self.critic.to(device)
         self.actor_target.to(device)
         self.critic_target.to(device)
-        
+
+        self._step = 0
+    
+    @torch.no_grad()
     def soft_update(self, net: nn.Module, target_net: nn.Module):
             for param, target_param in zip(net.parameters(), target_net.parameters()):
                 target_param.data.copy_(self.tau * param.data + (1 - self.tau) * target_param.data)
     
-    def get_action(self, state, action_noise = None):
-        """  
-        Given a state, compute the action to take according to the current policy.
-        Optionally add noise for exploration.
-        """
-        state = torch.as_tensor(state, dtype=torch.float32, device=self.device).unsqueeze(0)
-        
+    def get_action(self, state, action_noise=None):
+        s = torch.as_tensor(state, dtype=torch.float32, device=self.device).unsqueeze(0)
         self.actor.eval()
         with torch.no_grad():
-            action = self.actor(state).cpu().numpy().flatten()
+            a = self.actor(s).cpu().numpy().squeeze(0)   # model should already output in env bounds
         self.actor.train()
+
         if action_noise is not None:
-            action += action_noise() * 0.5 *( self.act_space.high[0] - self.act_space.low[0])
-        
-        return np.clip(action, self.act_space.low[0], self.act_space.high[0])
-    
+            # scale noise by per-dimension range
+            rng = (self.act_space.high - self.act_space.low).astype(np.float32)
+            a = a + action_noise() * 0.5 * rng
+
+        return np.clip(a, self.act_space.low, self.act_space.high)
 
     def update_step(self, batch):
         """  
@@ -82,13 +74,14 @@ class DDPGEngine():
         act = batch['act'].to(self.device)
         rew = batch['rew'].to(self.device)
         obs2 = batch['obs2'].to(self.device)
-        done = batch['done'].to(self.device)
+        term = batch['terminated'].to(self.device).float()
 
+        mask = 1.0 - term
         # 1. compute the targets
         with torch.no_grad():
             next_actions = self.actor_target(obs2)
             q_next = self.critic_target(obs2, next_actions)
-            q_target = rew + self.gamma * (1 - done) * q_next
+            q_target = rew + self.gamma * mask * q_next
 
         # 2. update Q-function (critic) by one step of gradient descent
         q_current = self.critic(obs, act)
@@ -99,21 +92,49 @@ class DDPGEngine():
         torch.nn.utils.clip_grad_norm_(self.critic.parameters(), 1.0)
         self.critic_optimizer.step()
 
-        # 3. update policy (actor) by one step of gradient ascent
-        actions_pred = self.actor(obs)
-        actor_loss = -self.critic(obs, actions_pred).mean()
-
-        self.actor_optimizer.zero_grad(set_to_none=True)
-        actor_loss.backward()
-        torch.nn.utils.clip_grad_norm_(self.actor.parameters(), 1.0)
-        self.actor_optimizer.step()
+        # --- Actor (every 2 steps) ---
+        actor_loss = None
+        self._step += 1
+        if self._step % 2 == 0:
+            self.actor_optimizer.zero_grad(set_to_none=True)
+            actions_pred = self.actor(obs)
+            actor_loss = -self.critic(obs, actions_pred).mean()
+            actor_loss.backward()
+            torch.nn.utils.clip_grad_norm_(self.actor.parameters(), 1.0)
+            self.actor_optimizer.step()
 
         # 4. update target networks with soft update
         self.soft_update(net=self.actor, target_net=self.actor_target)
         self.soft_update(net=self.critic,  target_net=self.critic_target)
 
-        return actor_loss.item(), critic_loss.item()
+        if actor_loss == None:
+            actor_loss_r = float('nan')
+        else:
+            actor_loss_r = actor_loss.item()
+        return actor_loss_r , critic_loss.item()
     
+    def update_step_with_Qexpert(self, batch):
+        """  
+        Update that assumes the critic already represents an expert Q-function.
+        Only the actor (and its target) are trained; critic weights stay untouched.
+
+        batch: dict with keys 'obs', 'act', 'rew', 'obs2', 'done' (From ReplayBuffer)
+        """
+        obs = batch['obs'].to(self.device)
+
+        self.actor_optimizer.zero_grad(set_to_none=True)
+        actions_pred = self.actor(obs)
+        actor_loss = -self.critic(obs, actions_pred).mean()
+        actor_loss.backward()
+        torch.nn.utils.clip_grad_norm_(self.actor.parameters(), 1.0)
+        self.actor_optimizer.step()
+
+        self.soft_update(net=self.actor, target_net=self.actor_target)
+        self.critic_target.load_state_dict(self.critic.state_dict())
+
+        return actor_loss.item(), float('nan')
+
+
     def set_eval(self):
         self.actor.eval()
         self.critic.eval()
@@ -125,16 +146,3 @@ class DDPGEngine():
         self.critic.train()
         self.actor_target.train()
         self.critic_target.train()
-
-    def get_save_bundle(self):
-        """  
-            returns a dict with all the states dict to be saved
-        """
-        return {
-            'actor': self.actor.state_dict(),
-            'critic': self.critic.state_dict(),
-            'actor_target': self.actor_target.state_dict(),
-            'critic_target': self.critic_target.state_dict(),
-            'actor_optimizer': self.actor_optimizer.state_dict(),
-            'critic_optimizer': self.critic_optimizer.state_dict()
-        }

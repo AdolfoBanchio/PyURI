@@ -169,8 +169,8 @@ class FIURIModule(nn.Module):
         E, O = state if state else (self._init_E, self._init_O)
         S = torch.clamp(E, self.clamp_min, self.clamp_max)
 
-        T = F.softplus(self.threshold)    # differentiable parameters
-        D = F.softplus(self.decay)
+        T = F.relu(self.threshold)    # differentiable parameters
+        D = F.relu(self.decay)
         
         eps = 1e-6
         eqE = (S - self.in_state).abs() <= eps
@@ -178,7 +178,7 @@ class FIURIModule(nn.Module):
         gt = S > T
         mask = (~gt) & eqE
 
-        new_o = F.softplus(S - T)
+        new_o = F.relu(S - T)
         new_e = torch.where(S > T, new_o, torch.where(mask, self.in_state - D, S))
 
         return new_o, (new_e, new_o)
@@ -195,8 +195,8 @@ class FIURIModule(nn.Module):
         E, O = state if state else (self._init_E, self._init_O)
         S = torch.clamp(E + chem_influence, self.clamp_min, self.clamp_max)
 
-        T = F.softplus(self.threshold)    # differentiable parameters
-        D = F.softplus(self.decay)
+        T = F.relu(self.threshold)    # differentiable parameters
+        D = F.relu(self.decay)
         
         eps = 1e-6
         eqE = (S - self.in_state).abs() <= eps
@@ -204,7 +204,7 @@ class FIURIModule(nn.Module):
         gt = S > T
         mask = (~gt) & eqE
 
-        new_o = F.softplus(S - T)
+        new_o = F.relu(S - T)
         new_e = torch.where(S > T, new_o, torch.where(mask, self.in_state - D, S))
 
         return new_o, (new_e, new_o)

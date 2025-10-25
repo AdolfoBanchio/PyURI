@@ -1,103 +1,69 @@
-# Models extrated from 
-# https://github.com/schneimo/ddpg-pytorch/blob/master/utils/nets.py
+import math
 import torch
-import numpy as np
 import torch.nn as nn
 import torch.nn.functional as F
 
-# if gpu is to be used
-device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-WEIGHTS_FINAL_INIT = 3e-3
-BIAS_FINAL_INIT = 3e-4
+""" 
+Models extracted from
+https://arxiv.org/pdf/1509.02971
+paper that introduces DDPG
+"""
+def fanin_init(tensor, fanin=None):
+    if fanin is None:
+        fanin = tensor.size(0)  # number of input units to this layer
+    bound = 1. / math.sqrt(fanin)
+    with torch.no_grad():
+        nn.init.uniform_(tensor, -bound, bound)
 
-
-def fan_in_uniform_init(tensor, fan_in=None):
-    """Utility function for initializing actor and critic"""
-    if fan_in is None:
-        fan_in = tensor.size(-1)
-
-    w = 1. / np.sqrt(fan_in)
-    nn.init.uniform_(tensor, -w, w)
+FINAL_W_INIT = 3e-3
 
 class Actor(nn.Module):
-    def __init__(self, state_dim: int, 
-                 action_dim: int, 
-                 sizes: list,
-                 max_action):
+    """
+    400-300 MLP (ReLU), tanh output rescaled to [-max_action, max_action].
+    Matches common DDPG baselines.
+    """
+    def __init__(self, state_dim: int, action_dim: int, max_action: float, size: list[int] = [400,300]):
         super().__init__()
-        
-        self.l1 = nn.Sequential(
-            nn.Linear(state_dim, sizes[0]), 
-            nn.LayerNorm(sizes[0]),
-            nn.LeakyReLU()
-            )
-        
-        self.l2 = nn.Sequential(
-            nn.Linear(sizes[0], sizes[1]),
-            nn.LayerNorm(sizes[1]), 
-            nn.LeakyReLU(),
-            )
-        
-        self.out = nn.Linear(sizes[1], action_dim)
+        self.fc1 = nn.Linear(state_dim, size[0])
+        self.fc2 = nn.Linear(size[0], size[1])
+        self.out = nn.Linear(size[1], action_dim)
+        self.max_action = float(max_action)
 
-        nn.init.uniform_(self.out.weight, -3e-3, 3e-3)
-        nn.init.uniform_(self.out.bias,   -3e-4, 3e-4)
-
+        # Init: fan-in for hidden layers, small uniform for output
+        fanin_init(self.fc1.weight); nn.init.zeros_(self.fc1.bias)
+        fanin_init(self.fc2.weight); nn.init.zeros_(self.fc2.bias)
+        nn.init.uniform_(self.out.weight, -FINAL_W_INIT, FINAL_W_INIT)
+        nn.init.uniform_(self.out.bias,   -FINAL_W_INIT, FINAL_W_INIT)
 
     def forward(self, s):
-        
-        x = s
-
-        # layer 1
-        x = self.l1(x)
-
-        # layer 2
-        x = self.l2(x)
-
-        return torch.tanh(self.out(x))
+        x = F.relu(self.fc1(s))
+        x = F.relu(self.fc2(x))
+        a = torch.tanh(self.out(x))                 # [-1, 1]
+        return a * self.max_action                   # rescale to env bounds
 
 
 class Critic(nn.Module):
-    def __init__(self, state_dim: int, action_dim: int, sizes: list = [64, 64]):
-        super(Critic, self).__init__()
-        num_outputs = action_dim
+    """
+    400-300 MLP (ReLU). Action is injected at the second layer:
+      x1 = ReLU(W1 s + b1)
+      x2 = ReLU(W2 [x1, a] + b2)
+      Q  = W3 x2 + b3  (scalar)
+    """
+    def __init__(self, state_dim: int, action_dim: int, size: list[int] = [400,300]):
+        super().__init__()
+        self.fcs1 = nn.Linear(state_dim, size[0])               # state -> 400
+        self.fcs2 = nn.Linear(size[0] + action_dim, size[1])        # [x1, a] -> 300
+        self.out  = nn.Linear(size[1], 1)
 
-        # Layer 1
-        self.linear1 = nn.Linear(state_dim, sizes[0])
-        self.ln1 = nn.LayerNorm(sizes[0])
+        # Init
+        fanin_init(self.fcs1.weight); nn.init.zeros_(self.fcs1.bias)
+        fanin_init(self.fcs2.weight); nn.init.zeros_(self.fcs2.bias)
+        nn.init.uniform_(self.out.weight, -FINAL_W_INIT, FINAL_W_INIT)
+        nn.init.uniform_(self.out.bias,   -FINAL_W_INIT, FINAL_W_INIT)
 
-        # Layer 2
-        # In the second layer the actions will be inserted also 
-        self.linear2 = nn.Linear(sizes[0] + num_outputs, sizes[1])
-        self.ln2 = nn.LayerNorm(sizes[1])
-
-        # Output layer (single value)
-        self.V = nn.Linear(sizes[1], 1)
-
-        # Weight Init
-        fan_in_uniform_init(self.linear1.weight)
-        fan_in_uniform_init(self.linear1.bias)
-
-        fan_in_uniform_init(self.linear2.weight)
-        fan_in_uniform_init(self.linear2.bias)
-
-        nn.init.uniform_(self.V.weight, -WEIGHTS_FINAL_INIT, WEIGHTS_FINAL_INIT)
-        nn.init.uniform_(self.V.bias, -BIAS_FINAL_INIT, BIAS_FINAL_INIT)
-
-    def forward(self, inputs, actions):
-        x = inputs
-
-        # Layer 1
-        x = self.linear1(x)
-        x = self.ln1(x)
-        x = F.leaky_relu(x)
-
-        # Layer 2
-        x = torch.cat((x, actions), 1)  # Insert the actions
-        x = self.linear2(x)
-        x = self.ln2(x)
-        x = F.leaky_relu(x)
-
-        # Output
-        V = self.V(x)
-        return V
+    def forward(self, s, a):
+        x = F.relu(self.fcs1(s))
+        x = torch.cat([x, a], dim=1)
+        x = F.relu(self.fcs2(x))
+        q = self.out(x)                                   # (B, 1)
+        return q

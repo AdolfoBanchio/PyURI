@@ -1,3 +1,5 @@
+import os
+import json
 import gymnasium as gym
 import numpy as np
 import torch
@@ -19,22 +21,39 @@ from datetime import datetime
 ENV = "MountainCarContinuous-v0"
 SEED = 42
 # --- Hyperparameters ---
-MAX_EPISODE = 220
+MAX_EPISODE = 400
+MAX_TIME_STEPS = 800
+WARMUP_STEPS = 10_000
+BATCH_SIZE        = 128
 NUM_UPDATE_LOOPS  = 1
-WARMUP_STEPS = 3000
-# _________________________
 GAMMA             = 0.99
 TAU               = 0.005
-BATCH_SIZE        = 64
-MAX_TIME_STEPS = 1000
-# _________________________
-DEVICE            = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-CRITIC_HID_LAYERS= [400, 300]
+ACTOR_LR = 2e-4
 CRITIC_LR= 1e-3
-ACTOR_LR = 1e-4
 
+SIGMA_START, SIGMA_END, SIGMA_DECAY_EPIS = 0.20, 0.05, 200
+
+CRITIC_HID_LAYERS= [20, 10]
+DEVICE            = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+# Dict to save hyerparams
+params = {
+    'max_episode': MAX_EPISODE,
+    'max_time_steps': MAX_TIME_STEPS,
+    'warmup_steps': WARMUP_STEPS,
+    'batch_size': BATCH_SIZE,
+    'num_update_loops': NUM_UPDATE_LOOPS,
+    'gamma': GAMMA,
+    'tau': TAU,
+    'actor_lr': ACTOR_LR,
+    'critic_lr': CRITIC_LR,
+    'critic_layers': CRITIC_HID_LAYERS,
+    'env': ENV,
+    'seed': SEED,
+    'device': str(DEVICE),
+}
 # --- HELPER FUNCTIONS ---
-def sigma_for_episode(ep, start=0.30, end=0.05, decay_episodes=100):
+def sigma_for_episode(ep, start=SIGMA_START, end=SIGMA_END, decay_episodes=SIGMA_DECAY_EPIS):
     frac = min(1.0, ep / decay_episodes)
     return start + (end - start) * frac
 
@@ -78,24 +97,27 @@ class OUNoise:
 np.random.seed(SEED)
 torch.manual_seed(SEED)
 env = gym.make(ENV)
+env.reset(seed=SEED)
 env.action_space.seed(SEED)
+
+state_dim = env.observation_space.shape[0]
+action_dim = env.action_space.shape[0]
 
 actor = build_twc(obs_encoder=mcc_obs_encoder,
                   action_decoder=twc_out_2_mcc_action,
                   log_stats=False)
 
-critic = Critic(state_dim=env.observation_space.shape[0],
-                action_dim=env.action_space.shape[0],
-                sizes=CRITIC_HID_LAYERS)
+critic = Critic(state_dim, action_dim, size=CRITIC_HID_LAYERS)
+
 
 replay_buf = ReplayBuffer(obs_dim=env.observation_space.shape[0],
                           act_dim=env.action_space.shape[0],
-                          size=52_000)
+                          size=100_000)
 
 ou_noise = OUNoise(action_dimension=env.action_space.shape[0])
 
 actor_opt = torch.optim.Adam(actor.parameters(),  lr=ACTOR_LR)
-critic_opt= torch.optim.Adam(critic.parameters(), lr=CRITIC_LR, weight_decay=1e-2)
+critic_opt= torch.optim.Adam(critic.parameters(), lr=CRITIC_LR)
 
 ddpg = DDPGEngine(gamma=GAMMA,
                   tau=TAU,
@@ -114,16 +136,22 @@ best_ret = -np.inf
 total_steps = 0
 # --- TRAIN LOOP ---
 # Create a unique run directory with timestamp
-run_name = f"twc_ddpg_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+run_name = f"twc_ddpg_{timestamp}"
 writer = SummaryWriter(f'runs/{run_name}')
 
+os.makedirs(writer.log_dir, exist_ok=True)
+params_path = os.path.join(writer.log_dir, "params.json")
+with open(params_path, "w") as f:
+    json.dump(params, f, indent=4)
+
 for e in tqdm(range(MAX_EPISODE)):
-    ddpg.actor.reset()
     obs, _ = env.reset()
     ou_noise.sigma = sigma_for_episode(e)
-    ou_noise.reset()
+    ou_noise.reset()    
     ep_reward = 0
     steps = 0
+    ddpg.actor.reset()
 
     for t in range(MAX_TIME_STEPS):
         if total_steps < WARMUP_STEPS:
@@ -136,7 +164,7 @@ for e in tqdm(range(MAX_EPISODE)):
         ep_reward += reward
         steps += 1
         
-        replay_buf.store(obs, action, reward, next_obs, done)
+        replay_buf.store(obs, action, reward, next_obs, terminated, truncated)
         obs = next_obs
         total_steps += 1
 
@@ -159,19 +187,20 @@ for e in tqdm(range(MAX_EPISODE)):
         eval_ret = evaluate_policy(env, ddpg, episodes=10)
         # Log evaluation return
         writer.add_scalar('Evaluation/Return', eval_ret, e)
+        writer.add_scalar('Evaluation/Return_steps', eval_ret, total_steps)
         print(f"Evaluation after Episode {e+1}: {eval_ret:.2f}")
         if eval_ret > best_ret:
             best_ret = eval_ret
-            torch.save(ddpg.actor.state_dict(), f"models/ddpg_twc_best.pth")
-            torch.save(ddpg.critic.state_dict(), f"models/ddpg_twc_critic_best.pth")
+            torch.save(ddpg.actor.state_dict(), f"models/twc_ddpg_actor_best_{timestamp}.pth")
+            torch.save(ddpg.critic.state_dict(), f"models/twc_ddpg_critic_best_{timestamp}.pth")
             print(f"New best evaluation reward: {best_ret:.2f}, models saved.")
 
 print("Training completed.")
 
 env.close()
 # save final models
-torch.save(ddpg.actor.state_dict(), f"models/ddpg_twc_final.pth")
-torch.save(ddpg.critic.state_dict(), f"models/ddpg_twc_critic_final.pth")
+torch.save(ddpg.actor.state_dict(), f"models/ddpg_twc_final_{timestamp}.pth")
+torch.save(ddpg.critic.state_dict(), f"models/ddpg_twc_critic_final_{timestamp}.pth")
 
 # Close tensorboard writer
 writer.close()
