@@ -197,12 +197,28 @@ class PPOEngine:
         # Normalize advantages
         advantages = (advantages - advantages.mean()) / (advantages.std() + 1e-8)
         
+        # Some actor implementations keep recurrent state inside the module.
+        # Ensure those cached tensors do not carry autograd history across
+        # optimization epochs, otherwise PyTorch will see them as a second
+        # backward through the same graph.
+        detach_state_fn = None
+        actor_level_detach = getattr(self.actor, "detach", None)
+        if callable(actor_level_detach):
+            detach_state_fn = actor_level_detach
+        else:
+            stateful_submodule = getattr(self.actor, "twc", None)
+            submodule_detach = getattr(stateful_submodule, "detach", None) if stateful_submodule is not None else None
+            if callable(submodule_detach):
+                detach_state_fn = submodule_detach
+
         # Training loop
         actor_losses = []
         critic_losses = []
         entropies = []
         
         for _ in range(epochs):
+            if detach_state_fn is not None:
+                detach_state_fn()
             # Get current policy outputs
             if hasattr(self.act_space, 'n'):  # Discrete actions
                 logits = self.actor(states)
@@ -223,36 +239,40 @@ class PPOEngine:
                 log_probs = log_probs.sum(dim=-1)
                 entropy = base_dist.entropy().sum(dim=-1).mean()  # entropy of base dist
             
-            # Compute ratios
+            # First get value prediction
+            current_values = self.critic(states)
+            
+            # Compute policy ratio and losses
             ratio = torch.exp(log_probs - old_log_probs)
+            surr1 = ratio * advantages.detach()  # Detach advantages
+            surr2 = torch.clamp(ratio, 1 - self.clip_ratio, 1 + self.clip_ratio) * advantages.detach()
+            policy_loss = -torch.min(surr1, surr2).mean()
             
-            # Compute clipped surrogate loss
-            surr1 = ratio * advantages
-            surr2 = torch.clamp(ratio, 1 - self.clip_ratio, 1 + self.clip_ratio) * advantages
-            actor_loss = -torch.min(surr1, surr2).mean()
-            
-            # Compute value loss
-            current_values = self.critic(states).squeeze()
-            value_loss = F.mse_loss(current_values, returns)
-            
-            # Total loss
-            total_loss = actor_loss + self.value_loss_coef * value_loss - self.entropy_coef * entropy
-            
+            # Add entropy bonus for exploration
+            actor_loss = policy_loss - self.entropy_coef * entropy
+
             # Update actor
             self.actor_optimizer.zero_grad()
-            actor_loss.backward(retain_graph=True)
+            actor_loss.backward()
             torch.nn.utils.clip_grad_norm_(self.actor.parameters(), self.max_grad_norm)
             self.actor_optimizer.step()
-            
+
+            # Compute value loss
+            value_loss = F.mse_loss(current_values, returns)
+            scaled_value_loss = self.value_loss_coef * value_loss
+
             # Update critic
             self.critic_optimizer.zero_grad()
-            value_loss.backward()
+            scaled_value_loss.backward()
             torch.nn.utils.clip_grad_norm_(self.critic.parameters(), self.max_grad_norm)
             self.critic_optimizer.step()
             
             actor_losses.append(actor_loss.item())
             critic_losses.append(value_loss.item())
             entropies.append(entropy.item())
+
+        if detach_state_fn is not None:
+            detach_state_fn()
         
         return {
             'actor_loss': np.mean(actor_losses),

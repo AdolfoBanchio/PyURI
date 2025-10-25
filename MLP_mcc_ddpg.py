@@ -17,22 +17,26 @@ from datetime import datetime
 ENV = "MountainCarContinuous-v0"
 SEED = 42
 # --- Hyperparameters ---
-MAX_EPISODE = 220
+MAX_EPISODE = 500
 NUM_UPDATE_LOOPS  = 1
 WARMUP_STEPS = 3000
 # _________________________
-GAMMA             = 0.98
-TAU               = 0.00034
-BATCH_SIZE        = 170
+GAMMA             = 0.995
+TAU               = 0.01
+BATCH_SIZE        = 128
 MAX_TIME_STEPS = 1000
 # _________________________
 DEVICE            = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-ACTOR_HID_LAYERS = [64, 128]
-CRITIC_HID_LAYERS= [64, 128]
-CRITIC_LR= 0.00346
-ACTOR_LR = 0.00032
+ACTOR_HID_LAYERS = [400, 300]
+CRITIC_HID_LAYERS= [400, 300]
+CRITIC_LR= 1e-3
+ACTOR_LR = 2e-4
 
 # --- HELPER FUNCTIONS ---
+def sigma_for_episode(ep, start=0.3, end=0.05, decay_episodes=150):
+    frac = min(1.0, ep / decay_episodes)
+    return start + (end - start) * frac
+
 @torch.no_grad()
 def evaluate_policy(env, ddpg: DDPGEngine, episodes=10):
     ddpg.actor.eval()
@@ -49,7 +53,7 @@ def evaluate_policy(env, ddpg: DDPGEngine, episodes=10):
     return total / episodes
 
 class OUNoise:
-    def __init__(self,action_dimension,mu=0, theta=0.15, sigma=0.184):
+    def __init__(self,action_dimension,mu=0, theta=0.15, sigma=0.2):
         self.action_dimension = action_dimension
         self.mu = mu
         self.theta = theta
@@ -76,7 +80,8 @@ env.action_space.seed(SEED)
 
 actor = Actor(state_dim=env.observation_space.shape[0],
               action_dim=env.action_space.shape[0],
-              sizes=ACTOR_HID_LAYERS)
+              sizes=ACTOR_HID_LAYERS,
+              max_action=env.action_space.high[0])
 
 critic = Critic(state_dim=env.observation_space.shape[0],
                 action_dim=env.action_space.shape[0],
@@ -84,7 +89,7 @@ critic = Critic(state_dim=env.observation_space.shape[0],
 
 replay_buf = ReplayBuffer(obs_dim=env.observation_space.shape[0],
                           act_dim=env.action_space.shape[0],
-                          size=52_000)
+                          size=100_000)
 
 ou_noise = OUNoise(action_dimension=env.action_space.shape[0])
 
@@ -113,15 +118,16 @@ writer = SummaryWriter(f'runs/{run_name}')
 
 for e in tqdm(range(MAX_EPISODE)):
     obs, _ = env.reset()
-    ou_noise.reset()
+    ou_noise.sigma = sigma_for_episode(e)
+    ou_noise.reset()    
     ep_reward = 0
     
     steps = 0
     for t in range(MAX_TIME_STEPS):
-        action = ddpg.get_action(
-            obs, 
-            action_noise=ou_noise.noise
-        )
+        if total_steps < WARMUP_STEPS:
+            action = env.action_space.sample()
+        else:
+            action = ddpg.get_action(obs, action_noise=ou_noise.noise)
 
         next_obs, reward, terminated, truncated, _ = env.step(action)
         done = terminated or truncated

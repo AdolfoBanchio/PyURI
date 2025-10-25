@@ -8,10 +8,10 @@ from copy import deepcopy
 
 class DDPGEngine():
     """  
+    TODO: UPDATE DOCSTRING
     This class functions as a helper to train any actor-critic model with DDPG.
     All objetcts must be already initialized before being passed to the engine.
     Parameters:
-        - DDPGConfig: hyperparamters related to the training procedure.
         - actor: nn.Module, the policy network.
         - critic: nn.Module, the Q-value network.
         - replay_buffer: ReplayBuffer, the experience replay buffer.
@@ -94,18 +94,18 @@ class DDPGEngine():
         q_current = self.critic(obs, act)
         critic_loss = nn.functional.smooth_l1_loss(q_current, q_target)
         
-        self.critic_optimizer.zero_grad()
+        self.critic_optimizer.zero_grad(set_to_none=True)
         critic_loss.backward()
-        #torch.nn.utils.clip_grad_norm_(self.critic.parameters(), 1.0)
+        torch.nn.utils.clip_grad_norm_(self.critic.parameters(), 1.0)
         self.critic_optimizer.step()
 
         # 3. update policy (actor) by one step of gradient ascent
         actions_pred = self.actor(obs)
         actor_loss = -self.critic(obs, actions_pred).mean()
 
-        self.actor_optimizer.zero_grad()
+        self.actor_optimizer.zero_grad(set_to_none=True)
         actor_loss.backward()
-        #torch.nn.utils.clip_grad_norm_(self.actor.parameters(), 1.0)
+        torch.nn.utils.clip_grad_norm_(self.actor.parameters(), 1.0)
         self.actor_optimizer.step()
 
         # 4. update target networks with soft update

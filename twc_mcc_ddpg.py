@@ -24,7 +24,7 @@ NUM_UPDATE_LOOPS  = 1
 WARMUP_STEPS = 3000
 # _________________________
 GAMMA             = 0.99
-TAU               = 0.0005
+TAU               = 0.005
 BATCH_SIZE        = 64
 MAX_TIME_STEPS = 1000
 # _________________________
@@ -34,7 +34,7 @@ CRITIC_LR= 1e-3
 ACTOR_LR = 1e-4
 
 # --- HELPER FUNCTIONS ---
-def sigma_for_episode(ep, start=0.30, end=0.05, decay_episodes=120):
+def sigma_for_episode(ep, start=0.30, end=0.05, decay_episodes=100):
     frac = min(1.0, ep / decay_episodes)
     return start + (end - start) * frac
 
