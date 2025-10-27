@@ -97,13 +97,6 @@ class FIURIModule(nn.Module):
         self.clamp_min = clamp_min
         self.clamp_max = clamp_max
 
-    # Functions to use Thr and decay as positive values during evaluation and training
-    def thr_pos(self):
-        return F.softplus(self.threshold)
-    
-    def dec_pos(self):
-        return F.softplus(self.decay)
-
     def _ensure_state(self, B: int, device, dtype):
         shape_mismatch = (self.in_state.ndim != 2) or (self.in_state.shape != (B, self.num_cells))
         if shape_mismatch:
@@ -146,18 +139,23 @@ class FIURIModule(nn.Module):
         self.in_state = self.in_state.detach()
         self.out_state = self.out_state.detach()
 
-    def _compute_gj_sum(self, gj_bundle, o_pre: torch.Tensor) -> torch.Tensor:
+    def _compute_gj_sum(self, gj_bundle, o_pre: torch.Tensor, current_in_state: torch.Tensor = None) -> torch.Tensor:
         src, dst, w = gj_bundle
         if src.numel() == 0:
-            return self.in_state.new_zeros(self.in_state.shape)  # (B, n)
+            return (current_in_state if current_in_state is not None else self.in_state).new_zeros(current_in_state.shape if current_in_state is not None else self.in_state.shape)  # (B, n)
 
         B = o_pre.size(0)
         Oj = o_pre[:, src]              # (B, E_gj)
-        En = self.in_state[:, dst]      # (B, E_gj)
+        print(f"o_pre {o_pre}")
+        # Use current state if provided, otherwise fall back to self.in_state
+        En_state = current_in_state if current_in_state is not None else self.in_state
+        En = En_state[:, dst]          # (B, E_gj)
+        
         sgn = torch.where(Oj >= En, 1.0, -1.0)
         contrib = Oj * w * sgn          # (B, E_gj)
+        print(f"contrib: {contrib}")
 
-        out = self.in_state.new_zeros(B, self.num_cells)
+        out = En_state.new_zeros(B, self.num_cells)
         _scatter_add_batched(contrib, dst, out)
         return out  # (B, n)
 
@@ -188,25 +186,30 @@ class FIURIModule(nn.Module):
         B = chem_influence.size(0)
         self._ensure_state(B, chem_influence.device, chem_influence.dtype)
         
+        # Extract current state for use in gap junction computation
+        E, O = state if state else (self._init_E, self._init_O)
+        
         if gj_bundle is not None:
             assert o_pre is not None, "o_pre must be provided when gj_bundle is not None"
-            gj_sum = self._compute_gj_sum(gj_bundle, o_pre)  # (B, n)
+            # Pass current state to gap junction computation
+            current_E_tensor = E if isinstance(E, torch.Tensor) else torch.full((B, self.num_cells), E, dtype=chem_influence.dtype, device=chem_influence.device)
+            gj_sum = self._compute_gj_sum(gj_bundle, o_pre, current_in_state=current_E_tensor)  # (B, n)
             chem_influence  = chem_influence + gj_sum          # (B, n)
         
-        E, O = state if state else (self._init_E, self._init_O)
         S = torch.clamp(E + chem_influence, self.clamp_min, self.clamp_max)
 
         T = self.threshold    # differentiable parameters
         D = self.decay
         
         eps = 1e-6
-        eqE = (S - self.in_state).abs() <= eps
+        eqE = (S - E).abs() <= eps
+        #eqE = S == E 
 
         gt = S > T
         mask = (~gt) & eqE
 
         new_o = F.relu(S - T)
-        new_e = torch.where(S > T, new_o, torch.where(mask, self.in_state - D, S))
+        new_e = torch.where(S > T, new_o, torch.where(mask, E - D, S))
 
         return new_o, (new_e, new_o)
 
