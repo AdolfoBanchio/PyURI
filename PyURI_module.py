@@ -86,9 +86,10 @@ class FIURIModule(nn.Module):
         self.register_buffer("in_state", torch.tensor(initial_in_state, dtype=torch.float32))  # E (batch, n)
         self.register_buffer("out_state", torch.tensor(initial_out_state, dtype=torch.float32))  # O/output (batch, n) — BindsNET convention      
         
-        self.in_state = torch.tensor(initial_in_state, dtype=torch.float32, requires_grad=True)
-        self.out_state = torch.tensor(initial_out_state, dtype=torch.float32, requires_grad=True)
-        # defaults for initial states (scalars stored just to use at first allocation)
+        # initialize state buffers as (1, num_cells) rows filled with the initial values
+        self.in_state = torch.full((1, self.num_cells), float(initial_in_state), dtype=torch.float32)
+        self.out_state = torch.full((1, self.num_cells), float(initial_out_state), dtype=torch.float32)
+        # defaults for initial states (rows used at first allocation)
         self._init_E = float(initial_in_state)
         self._init_O = float(initial_out_state)
 
@@ -169,8 +170,8 @@ class FIURIModule(nn.Module):
         E, O = state if state else (self._init_E, self._init_O)
         S = torch.clamp(E, self.clamp_min, self.clamp_max)
 
-        T = F.relu(self.threshold)    # differentiable parameters
-        D = F.relu(self.decay)
+        T = self.threshold    # differentiable parameters
+        D = self.decay
         
         eps = 1e-6
         eqE = (S - self.in_state).abs() <= eps
@@ -195,8 +196,8 @@ class FIURIModule(nn.Module):
         E, O = state if state else (self._init_E, self._init_O)
         S = torch.clamp(E + chem_influence, self.clamp_min, self.clamp_max)
 
-        T = F.relu(self.threshold)    # differentiable parameters
-        D = F.relu(self.decay)
+        T = self.threshold    # differentiable parameters
+        D = self.decay
         
         eps = 1e-6
         eqE = (S - self.in_state).abs() <= eps

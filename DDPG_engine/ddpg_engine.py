@@ -20,6 +20,7 @@ class DDPGEngine():
                  critic: nn.Module,
                  actor_optimizer: torch.optim.Optimizer,
                  critic_optimizer: torch.optim.Optimizer,
+                 update_every: int,
                  device: torch.device):
         self.gamma = gamma
         self.tau = tau
@@ -39,6 +40,7 @@ class DDPGEngine():
         self.actor_target.to(device)
         self.critic_target.to(device)
 
+        self.update_every = update_every
         self._step = 0
     
     @torch.no_grad()
@@ -48,11 +50,10 @@ class DDPGEngine():
     
     def get_action(self, state, action_noise=None):
         s = torch.as_tensor(state, dtype=torch.float32, device=self.device).unsqueeze(0)
-        self.actor.eval()
+        
         with torch.no_grad():
             a = self.actor(s).cpu().numpy().squeeze(0)   # model should already output in env bounds
-        self.actor.train()
-
+        
         if action_noise is not None:
             # scale noise by per-dimension range
             rng = (self.act_space.high - self.act_space.low).astype(np.float32)
@@ -95,7 +96,7 @@ class DDPGEngine():
         # --- Actor (every 2 steps) ---
         actor_loss = None
         self._step += 1
-        if self._step % 2 == 0:
+        if self._step % self.update_every == 0:
             self.actor_optimizer.zero_grad(set_to_none=True)
             actions_pred = self.actor(obs)
             actor_loss = -self.critic(obs, actions_pred).mean()

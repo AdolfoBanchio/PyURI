@@ -16,8 +16,8 @@ from utils.twc_io import mcc_obs_encoder, twc_out_2_mcc_action
 
 ENV = "MountainCarContinuous-v0"
 SEED = 42
-DEFAULT_EPISODES = 100
-DEFAULT_ACTOR_HIDDEN = [5, 5]
+DEFAULT_EPISODES = 1000
+DEFAULT_ACTOR_HIDDEN = [64, 64]
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 
@@ -43,6 +43,7 @@ def get_actor(model_path: str, env: gym.Env, hidden_sizes=None) -> torch.nn.Modu
         )
 
     state_dict = torch.load(model_path, map_location=DEVICE)
+    print(state_dict)
     actor.load_state_dict(state_dict)
     actor.to(DEVICE)
     actor.eval()
@@ -214,11 +215,12 @@ def parse_args():
     parser.add_argument(
         "--record-best",
         action="store_true",
+        default=True,
         help="If set, record the best episode based on total reward.",
     )
     parser.add_argument(
         "--mlp-hidden",
-        type=int,
+        type=list[int],
         nargs="+",
         help="Optional hidden sizes for the MLP actor (ignored for TWC models).",
     )

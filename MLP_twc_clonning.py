@@ -21,17 +21,18 @@ from datetime import datetime
 ENV = "MountainCarContinuous-v0"
 SEED = 42
 # --- Hyperparameters ---
-MAX_EPISODE = 300
-MAX_TIME_STEPS = 800
-WARMUP_STEPS = 5_000
+MAX_EPISODE = 500
+MAX_TIME_STEPS = 999
+WARMUP_STEPS = 10_000
 BATCH_SIZE        = 64
 NUM_UPDATE_LOOPS  = 1
+UPDATE_EVERY = 2
 GAMMA             = 0.99
-TAU               = 0.005
-ACTOR_LR = 1e-4
+TAU               = 0.001
+ACTOR_LR = 1e-5
 CRITIC_LR= 1e-3
 
-SIGMA_START, SIGMA_END, SIGMA_DECAY_EPIS = 0.20, 0.05, 100
+SIGMA_START, SIGMA_END, SIGMA_DECAY_EPIS = 0.20, 0.05, 150
 
 CRITIC_HID_LAYERS= [20, 10]
 DEVICE            = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -43,6 +44,7 @@ params = {
     'warmup_steps': WARMUP_STEPS,
     'batch_size': BATCH_SIZE,
     'num_update_loops': NUM_UPDATE_LOOPS,
+    'update_every': UPDATE_EVERY,
     'gamma': GAMMA,
     'tau': TAU,
     'actor_lr': ACTOR_LR,
@@ -50,6 +52,9 @@ params = {
     'critic_layers': CRITIC_HID_LAYERS,
     'env': ENV,
     'seed': SEED,
+    'sigma_start': SIGMA_START,
+    'sigma_end': SIGMA_END,
+    'sigma_ep_end': SIGMA_DECAY_EPIS,
     'device': str(DEVICE),
 }
 # --- HELPER FUNCTIONS ---
@@ -108,6 +113,7 @@ actor = build_twc(obs_encoder=mcc_obs_encoder,
                   log_stats=False)
 
 critic = Critic(state_dim, action_dim, size=CRITIC_HID_LAYERS)
+
 critic_path = "models/ddpg_critic_best.pth"
 state_dict = torch.load(critic_path, map_location=DEVICE)
 critic.load_state_dict(state_dict)
@@ -118,7 +124,8 @@ for param in critic.parameters():
     
 replay_buf = ReplayBuffer(obs_dim=env.observation_space.shape[0],
                           act_dim=env.action_space.shape[0],
-                          size=100_000)
+                          size=100_000,
+                          keep=WARMUP_STEPS)
 
 ou_noise = OUNoise(action_dimension=env.action_space.shape[0])
 
@@ -132,6 +139,7 @@ ddpg = DDPGEngine(gamma=GAMMA,
                   critic=critic,
                   actor_optimizer=actor_opt,
                   critic_optimizer=None,
+                  update_every=UPDATE_EVERY,
                   device=DEVICE)
 
 

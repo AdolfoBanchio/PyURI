@@ -2,7 +2,7 @@ import numpy as np
 import torch
 
 class ReplayBuffer:
-    def __init__(self, obs_dim, act_dim, size=1e6):
+    def __init__(self, obs_dim, act_dim, size=1e6, keep = 10000):
         self.obs = np.zeros((size, obs_dim), dtype=np.float32)
         self.act = np.zeros((size, act_dim), dtype=np.float32)
         self.rew = np.zeros((size, 1),       dtype=np.float32)
@@ -10,7 +10,7 @@ class ReplayBuffer:
         self.terminated = np.zeros((size,1), dtype=np.float32)
         self.truncated = np.zeros((size,1), dtype=np.float32)
         self.max_size, self.ptr, self.size = int(size), 0, 0
-        self.keep_first = int(20_000)
+        self.keep_first = int(keep)
 
     def store(self, s, a, r, s2, ter, trunc):
         self.obs[self.ptr]  = s

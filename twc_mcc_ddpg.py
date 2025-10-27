@@ -21,11 +21,12 @@ from datetime import datetime
 ENV = "MountainCarContinuous-v0"
 SEED = 42
 # --- Hyperparameters ---
-MAX_EPISODE = 400
-MAX_TIME_STEPS = 800
+MAX_EPISODE = 500
+MAX_TIME_STEPS = 999
 WARMUP_STEPS = 10_000
-BATCH_SIZE        = 128
+BATCH_SIZE        = 64
 NUM_UPDATE_LOOPS  = 1
+UPDATE_EVERY = 2
 GAMMA             = 0.99
 TAU               = 0.005
 ACTOR_LR = 2e-4
@@ -43,6 +44,7 @@ params = {
     'warmup_steps': WARMUP_STEPS,
     'batch_size': BATCH_SIZE,
     'num_update_loops': NUM_UPDATE_LOOPS,
+    'update_every': UPDATE_EVERY,
     'gamma': GAMMA,
     'tau': TAU,
     'actor_lr': ACTOR_LR,
@@ -50,6 +52,9 @@ params = {
     'critic_layers': CRITIC_HID_LAYERS,
     'env': ENV,
     'seed': SEED,
+    'sigma_start': SIGMA_START,
+    'sigma_end': SIGMA_END,
+    'sigma_ep_end': SIGMA_DECAY_EPIS,
     'device': str(DEVICE),
 }
 # --- HELPER FUNCTIONS ---
@@ -112,7 +117,8 @@ critic = Critic(state_dim, action_dim, size=CRITIC_HID_LAYERS)
 
 replay_buf = ReplayBuffer(obs_dim=env.observation_space.shape[0],
                           act_dim=env.action_space.shape[0],
-                          size=100_000)
+                          size=100_000,
+                          keep=WARMUP_STEPS)
 
 ou_noise = OUNoise(action_dimension=env.action_space.shape[0])
 
@@ -127,6 +133,7 @@ ddpg = DDPGEngine(gamma=GAMMA,
                   critic=critic,
                   actor_optimizer=actor_opt,
                   critic_optimizer=critic_opt,
+                  update_every=UPDATE_EVERY,
                   device=DEVICE)
 
 
@@ -199,8 +206,8 @@ print("Training completed.")
 
 env.close()
 # save final models
-torch.save(ddpg.actor.state_dict(), f"models/ddpg_twc_final_{timestamp}.pth")
-torch.save(ddpg.critic.state_dict(), f"models/ddpg_twc_critic_final_{timestamp}.pth")
+torch.save(ddpg.actor.state_dict(), f"models/twc_ddpg_final_{timestamp}.pth")
+torch.save(ddpg.critic.state_dict(), f"models/twc_ddpg_critic_final_{timestamp}.pth")
 
 # Close tensorboard writer
 writer.close()

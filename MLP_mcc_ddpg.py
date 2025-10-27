@@ -24,6 +24,7 @@ MAX_TIME_STEPS = 999
 WARMUP_STEPS = 5_000
 BATCH_SIZE        = 64
 NUM_UPDATE_LOOPS  = 4
+UPDATE_EVERY = 2
 GAMMA             = 0.99
 TAU               = 0.001
 SIGMA_START, SIGMA_END, SIGMA_DECAY_EPIS = 0.20, 0.05, 150
@@ -31,8 +32,8 @@ SIGMA_START, SIGMA_END, SIGMA_DECAY_EPIS = 0.20, 0.05, 150
 ACTOR_LR = 1e-4
 CRITIC_LR= 1e-3
 
-ACTOR_HID_LAYERS = [5, 5]
-CRITIC_HID_LAYERS= [20, 10]
+ACTOR_HID_LAYERS = [400, 300]
+CRITIC_HID_LAYERS= [400, 300]
 DEVICE            = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 # Dict to save hyerparams
@@ -42,6 +43,7 @@ params = {
     'warmup_steps': WARMUP_STEPS,
     'batch_size': BATCH_SIZE,
     'num_update_loops': NUM_UPDATE_LOOPS,
+    'update_every': UPDATE_EVERY,
     'gamma': GAMMA,
     'tau': TAU,
     'actor_lr': ACTOR_LR,
@@ -50,6 +52,9 @@ params = {
     'critic_hidden_layers': CRITIC_HID_LAYERS,
     'env': ENV,
     'seed': SEED,
+    'sigma_start': SIGMA_START,
+    'sigma_end': SIGMA_END,
+    'sigma_ep_end': SIGMA_DECAY_EPIS,
     'device': str(DEVICE),
 }
 # --- HELPER FUNCTIONS ---
@@ -126,6 +131,7 @@ ddpg = DDPGEngine(gamma=GAMMA,
                   critic=critic,
                   actor_optimizer=actor_opt,
                   critic_optimizer=critic_opt,
+                  update_every=UPDATE_EVERY,
                   device=DEVICE)
 
 
