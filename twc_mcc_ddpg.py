@@ -10,7 +10,7 @@ from DDPG_engine.ddpg_engine import DDPGEngine
 from DDPG_engine.replay_buffer import ReplayBuffer
 from utils.MLP_models import Critic
 from utils.twc_builder import build_twc
-from utils.twc_io import twc_out_2_mcc_action, mcc_obs_encoder, twc_out_2_mcc_action_tanh
+from utils.twc_io import twc_out_2_mcc_action, mcc_obs_encoder, twc_out_2_mcc_action_tanh, mcc_obs_encoder_speed_weighted
 from tqdm import tqdm
 from torch.utils.tensorboard import SummaryWriter
 from datetime import datetime
@@ -21,21 +21,23 @@ from datetime import datetime
 ENV = "MountainCarContinuous-v0"
 SEED = 42
 # --- Hyperparameters ---
-MAX_EPISODE = 500
-MAX_TIME_STEPS = 999
-WARMUP_STEPS = 10_000
-BATCH_SIZE        = 64
-NUM_UPDATE_LOOPS  = 1
-UPDATE_EVERY = 2
-GAMMA             = 0.99
-TAU               = 0.005
-ACTOR_LR = 2e-4
-CRITIC_LR= 1e-3
+MAX_EPISODE        = 500
+MAX_TIME_STEPS     = 999
+WARMUP_STEPS       = 10_000
+BATCH_SIZE         = 128
+NUM_UPDATE_LOOPS   = 1
+UPDATE_EVERY       = 2
+GAMMA              = 0.99
+TAU                = 0.005
+ACTOR_LR           = 5e-3
+CRITIC_LR          = 5e-4
+MINI_BATCH         = 3
+WORST_K            = 1
+TWC_INTERNAL_STEPS = 3
+CRITIC_HID_LAYERS  = [400, 300]
+DEVICE             = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 SIGMA_START, SIGMA_END, SIGMA_DECAY_EPIS = 0.20, 0.05, 200
-
-CRITIC_HID_LAYERS= [20, 10]
-DEVICE            = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 # Dict to save hyerparams
 params = {
@@ -49,7 +51,10 @@ params = {
     'tau': TAU,
     'actor_lr': ACTOR_LR,
     'critic_lr': CRITIC_LR,
+    'mini_batch': MINI_BATCH,
+    'worst_k': WORST_K,
     'critic_layers': CRITIC_HID_LAYERS,
+    'twc_internal_steps': TWC_INTERNAL_STEPS,
     'env': ENV,
     'seed': SEED,
     'sigma_start': SIGMA_START,
@@ -57,6 +62,7 @@ params = {
     'sigma_ep_end': SIGMA_DECAY_EPIS,
     'device': str(DEVICE),
 }
+
 # --- HELPER FUNCTIONS ---
 def sigma_for_episode(ep, start=SIGMA_START, end=SIGMA_END, decay_episodes=SIGMA_DECAY_EPIS):
     frac = min(1.0, ep / decay_episodes)
@@ -66,17 +72,19 @@ def sigma_for_episode(ep, start=SIGMA_START, end=SIGMA_END, decay_episodes=SIGMA
 def evaluate_policy(env, ddpg: DDPGEngine, episodes=10):
     ddpg.actor.eval()
     total = 0.0
+    eval_actions = []
     for _ in range(episodes):
         obs, _ = env.reset()
         ddpg.actor.reset()
         done = False
         while not done:
             a = ddpg.get_action(obs, action_noise=None)
+            eval_actions.append(a)
             obs, r, terminated, truncated, _ = env.step(a)
             total += r
             done = terminated or truncated
     ddpg.actor.train()
-    return total / episodes
+    return (total / episodes), np.mean(eval_actions)
 
 class OUNoise:
     def __init__(self,action_dimension,mu=0, theta=0.15, sigma=0.2):
@@ -108,8 +116,9 @@ env.action_space.seed(SEED)
 state_dim = env.observation_space.shape[0]
 action_dim = env.action_space.shape[0]
 
-actor = build_twc(obs_encoder=mcc_obs_encoder,
-                  action_decoder=twc_out_2_mcc_action,
+actor = build_twc(obs_encoder=mcc_obs_encoder_speed_weighted,
+                  action_decoder=twc_out_2_mcc_action_tanh,
+                  internal_steps=TWC_INTERNAL_STEPS,
                   log_stats=False)
 
 critic = Critic(state_dim, action_dim, size=CRITIC_HID_LAYERS)
@@ -159,7 +168,7 @@ for e in tqdm(range(MAX_EPISODE)):
     ep_reward = 0
     steps = 0
     ddpg.actor.reset()
-
+    ep_actions = []
     for t in range(MAX_TIME_STEPS):
         if total_steps < WARMUP_STEPS:
             action = env.action_space.sample()
@@ -176,9 +185,15 @@ for e in tqdm(range(MAX_EPISODE)):
         total_steps += 1
 
         if total_steps > WARMUP_STEPS and replay_buf.size >= BATCH_SIZE:
+            ep_actions.append(action)
             for _ in range(NUM_UPDATE_LOOPS):
                 batch = replay_buf.sample(BATCH_SIZE, DEVICE)
-                actor_loss, critic_loss = ddpg.update_step(batch)
+                #actor_loss, critic_loss = ddpg.update_step(batch)
+                actor_loss, critic_loss = ddpg.update_step_worst_k(replay=replay_buf,
+                                                                   batch_size=BATCH_SIZE, 
+                                                                   M=MINI_BATCH,
+                                                                   WORST=WORST_K
+                                                                   )
                 # Log losses
                 writer.add_scalar('Loss/Actor', actor_loss, total_steps)
                 writer.add_scalar('Loss/Critic', critic_loss, total_steps)
@@ -189,12 +204,14 @@ for e in tqdm(range(MAX_EPISODE)):
     # Log episode return
     writer.add_scalar('Training/Episode_Return', ep_reward, e)
     writer.add_scalar('Training/Episode_steps', steps, e)
+    writer.add_scalar('Training/AvgAction', np.mean(ep_actions), e)
 
     if (e+1) % 10 == 0:
-        eval_ret = evaluate_policy(env, ddpg, episodes=10)
+        eval_ret, eval_avg_action = evaluate_policy(env, ddpg, episodes=10)
         # Log evaluation return
         writer.add_scalar('Evaluation/Return', eval_ret, e)
-        writer.add_scalar('Evaluation/Return_steps', eval_ret, total_steps)
+        writer.add_scalar('Evaluation/AvgAction', eval_avg_action, e)
+        #writer.add_scalar('Evaluation/Return_steps', eval_ret, total_steps)
         print(f"Evaluation after Episode {e+1}: {eval_ret:.2f}")
         if eval_ret > best_ret:
             best_ret = eval_ret

@@ -23,6 +23,7 @@ def create_layer(n_neurons) -> FIURIModule:
 
 def build_twc(obs_encoder: Callable,
               action_decoder: Callable,
+              internal_steps: int,
               log_stats: bool = True) -> nn.Module:
     """ Extracts the data from thr TWC description
     and returns a nn.Module with the TWC implementation
@@ -87,6 +88,7 @@ def build_twc(obs_encoder: Callable,
                 "out": [],
             }
             self._state = None
+            self.internal_steps = internal_steps
 
         def _init_layer_state(self, layer: FIURIModule, batch_size: int, device, dtype):
             E0 = torch.full((batch_size, layer.num_cells), layer._init_E, device=device, dtype=dtype)
@@ -117,8 +119,11 @@ def build_twc(obs_encoder: Callable,
                   - raw observation (B, 2) -> will be encoded via the function provided.
 
                 When creating the module a proper input encoder to the 4 sensory neurons must be provided
-                if you plan to pass raw observations. Decoder must accept keyword args
+                Assumes raw observations. Decoder must accept keyword args
                 n_inputs and device (compatible with utils.twc_io_wrapper.default_obs_encoder).
+
+                returns:
+                  - REV and FWD outputs decoded by the action decoder.
             """
             device = next(self.parameters()).device
             if x.device != device:
@@ -127,15 +132,18 @@ def build_twc(obs_encoder: Callable,
             B = ex_in.size(0)
             dtype = ex_in.dtype
             state = self._ensure_state(B, device, dtype)
+            
+            if self.training and self._state is not None:
+                state = {name: (pair[0].detach(), pair[1].detach()) for name, pair in state.items()}
 
             in_state = state["in"]
-            in_out, new_in_state = self.in_layer(ex_in - in_in, state=in_state)
+            in_out, new_in_state = self.in_layer(ex_in + in_in, state=in_state)
             state["in"] = new_in_state
 
             hid_state = state["hid"]
             hid_out = None
             
-            for _ in range(1):
+            for _ in range(self.internal_steps):
                 in2hid_influence = self.in2hid_IN(in_out)
                 in2hid_gj_bundle = self.in2hid_GJ(in_out)
                 
@@ -178,18 +186,12 @@ def build_twc(obs_encoder: Callable,
             """  
                 Resets the state variables for each layer
             """
-            self.in_layer.reset_state()
-            self.hid_layer.reset_state()
-            self.out_layer.reset_state()
             param = next(self.parameters())
             device = param.device
             dtype = param.dtype
             self._state = self._make_state(batch_size=1, device=device, dtype=dtype)
         
         def detach(self):
-            self.in_layer.detach()
-            self.hid_layer.detach()
-            self.out_layer.detach()
             if self._state is not None:
                 self._state = {
                     name: (state_pair[0].detach(), state_pair[1].detach())

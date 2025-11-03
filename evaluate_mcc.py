@@ -17,7 +17,7 @@ from utils.twc_io import mcc_obs_encoder, twc_out_2_mcc_action
 ENV = "MountainCarContinuous-v0"
 SEED = 42
 DEFAULT_EPISODES = 1000
-DEFAULT_ACTOR_HIDDEN = [64, 64]
+DEFAULT_ACTOR_HIDDEN = [400, 300]
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 

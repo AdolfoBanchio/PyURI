@@ -28,11 +28,11 @@ BATCH_SIZE        = 64
 NUM_UPDATE_LOOPS  = 1
 UPDATE_EVERY = 2
 GAMMA             = 0.99
-TAU               = 0.001
-ACTOR_LR = 1e-5
+TAU               = 0.005
+ACTOR_LR = 1e-4
 CRITIC_LR= 1e-3
 
-SIGMA_START, SIGMA_END, SIGMA_DECAY_EPIS = 0.20, 0.05, 150
+SIGMA_START, SIGMA_END, SIGMA_DECAY_EPIS = 0.20, 0.05, 100
 
 CRITIC_HID_LAYERS= [20, 10]
 DEVICE            = torch.device("cuda" if torch.cuda.is_available() else "cpu")

@@ -5,6 +5,39 @@ import gymnasium as gym
 from tqdm import tqdm
 from copy import deepcopy
 
+# Helper functions
+class MeanAbsolutePercentageError(nn.Module):
+    """
+    Mean Absolute Percentage Error (MAPE) loss.
+
+    Computes mean(|(y_pred - y_true) / max(eps, |y_true|)|).
+    Useful when relative error matters and targets may span orders of magnitude.
+
+    Parameters
+    - eps: Small constant to avoid division by zero.
+    - reduction: 'mean' | 'sum' | 'none'
+    """
+
+    def __init__(self, eps: float = 1e-8, reduction: str = 'mean'):
+        super().__init__()
+        self.eps = float(eps)
+        if reduction not in ('mean', 'sum', 'none'):
+            raise ValueError("reduction must be 'mean', 'sum', or 'none'")
+        self.reduction = reduction
+
+    def forward(self, input: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
+        # Ensure same dtype/device; broadcasting handled by PyTorch if shapes align
+        denom = target.abs().clamp_min(self.eps)
+        loss = (input - target).abs() / denom
+
+        if self.reduction == 'mean':
+            return loss.mean()
+        if self.reduction == 'sum':
+            return loss.sum()
+        return loss
+
+
+mape = MeanAbsolutePercentageError()
 
 class DDPGEngine():
     """  
@@ -51,9 +84,10 @@ class DDPGEngine():
     def get_action(self, state, action_noise=None):
         s = torch.as_tensor(state, dtype=torch.float32, device=self.device).unsqueeze(0)
         
+        self.actor.eval()
         with torch.no_grad():
             a = self.actor(s).cpu().numpy().squeeze(0)   # model should already output in env bounds
-        
+        self.actor.train()
         if action_noise is not None:
             # scale noise by per-dimension range
             rng = (self.act_space.high - self.act_space.low).astype(np.float32)
@@ -76,9 +110,19 @@ class DDPGEngine():
         rew = batch['rew'].to(self.device)
         obs2 = batch['obs2'].to(self.device)
         term = batch['terminated'].to(self.device).float()
+        trunc = batch.get('truncated', None)
+        if trunc is not None:
+            trunc = trunc.to(self.device).float()
+            term = torch.clamp(term + trunc, 0.0, 1.0)  # treat either as terminal
 
         mask = 1.0 - term
         # 1. compute the targets
+        # Ensure recurrent actors do not carry hidden state across random batches
+        if hasattr(self.actor, 'reset'):
+            self.actor.reset()
+        if hasattr(self.actor_target, 'reset'):
+            self.actor_target.reset()
+
         with torch.no_grad():
             next_actions = self.actor_target(obs2)
             q_next = self.critic_target(obs2, next_actions)
@@ -87,6 +131,7 @@ class DDPGEngine():
         # 2. update Q-function (critic) by one step of gradient descent
         q_current = self.critic(obs, act)
         critic_loss = nn.functional.smooth_l1_loss(q_current, q_target)
+        #critic_loss = mape.forward(q_current, q_target)
         
         self.critic_optimizer.zero_grad(set_to_none=True)
         critic_loss.backward()
@@ -147,3 +192,77 @@ class DDPGEngine():
         self.critic.train()
         self.actor_target.train()
         self.critic_target.train()
+
+    def update_step_worst_k(self, replay, batch_size, M=3, WORST=1):
+            losses = []
+            batches = []
+            with torch.no_grad():
+                for _ in range(M):
+                    # Reset target actor state per random batch to avoid leakage
+                    if hasattr(self.actor_target, 'reset'):
+                        self.actor_target.reset()
+                    b = replay.sample(batch_size, self.device)
+                    obs, act, rew, obs2 = b['obs'], b['act'], b['rew'], b['obs2']
+                    term = b['terminated'].float()
+                    trunc = b.get('truncated', None)
+                    if trunc is not None:
+                        term = torch.clamp(term + trunc.float(), 0.0, 1.0)
+                    mask = 1.0 - term
+                    a2   = self.actor_target(obs2)
+                    q2   = self.critic_target(obs2, a2)
+                    y    = rew + self.gamma * mask * q2
+                    q    = self.critic(obs, act)
+                    l    = torch.nn.functional.smooth_l1_loss(q, y, reduction='mean')  # cheap scalar
+                    losses.append(l.item())
+                    batches.append(b)
+    
+            # pick indices of the WORST losses
+            idxs = sorted(range(M), key=lambda i: losses[i], reverse=True)[:WORST]
+    
+            # ---------- single backprop pass on selected ----------
+            self.critic_optimizer.zero_grad(set_to_none=True)
+            total_loss = 0.0
+            for i in idxs:
+                b = batches[i]
+                obs, act, rew, obs2 = b['obs'], b['act'], b['rew'], b['obs2']
+                term = b['terminated'].float()
+                trunc = b.get('truncated', None)
+                if trunc is not None:
+                    term = torch.clamp(term + trunc.float(), 0.0, 1.0)
+                mask = 1.0 - term
+                with torch.no_grad():
+                    if hasattr(self.actor_target, 'reset'):
+                        self.actor_target.reset()
+                    a2 = self.actor_target(obs2)
+                    y  = rew + self.gamma * mask * self.critic_target(obs2, a2)
+                q = self.critic(obs, act)
+                total_loss = total_loss + torch.nn.functional.smooth_l1_loss(q, y, reduction='mean')
+    
+            critic_loss = total_loss / float(WORST)
+            critic_loss.backward()
+            torch.nn.utils.clip_grad_norm_(self.critic.parameters(), 1.0)
+            self.critic_optimizer.step()
+    
+            # --- Actor (every 2 steps) ---
+            actor_loss = None
+            self._step += 1
+            if self._step % self.update_every == 0:
+                # Reset policy state before batched actor update as well
+                if hasattr(self.actor, 'reset'):
+                    self.actor.reset()
+                self.actor_optimizer.zero_grad(set_to_none=True)
+                actions_pred = self.actor(obs)
+                actor_loss = -self.critic(obs, actions_pred).mean()
+                actor_loss.backward()
+                torch.nn.utils.clip_grad_norm_(self.actor.parameters(), 1.0)
+                self.actor_optimizer.step()
+    
+            # 4. update target networks with soft update
+            self.soft_update(net=self.actor, target_net=self.actor_target)
+            self.soft_update(net=self.critic,  target_net=self.critic_target)
+    
+            if actor_loss == None:
+                actor_loss_r = float('nan')
+            else:
+                actor_loss_r = actor_loss.item()
+            return actor_loss_r , critic_loss.item()

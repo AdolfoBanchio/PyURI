@@ -81,15 +81,7 @@ class FIURIModule(nn.Module):
 
         self.threshold = nn.Parameter(t_init, requires_grad=True) 
         self.decay     = nn.Parameter(d_init, requires_grad=True)
-        # --- persistent state buffers (allocated lazily with correct batch/device/dtype)
         
-        self.register_buffer("in_state", torch.tensor(initial_in_state, dtype=torch.float32))  # E (batch, n)
-        self.register_buffer("out_state", torch.tensor(initial_out_state, dtype=torch.float32))  # O/output (batch, n) — BindsNET convention      
-        
-        # initialize state buffers as (1, num_cells) rows filled with the initial values
-        self.in_state = torch.full((1, self.num_cells), float(initial_in_state), dtype=torch.float32)
-        self.out_state = torch.full((1, self.num_cells), float(initial_out_state), dtype=torch.float32)
-        # defaults for initial states (rows used at first allocation)
         self._init_E = float(initial_in_state)
         self._init_O = float(initial_out_state)
 
@@ -97,47 +89,6 @@ class FIURIModule(nn.Module):
         self.clamp_min = clamp_min
         self.clamp_max = clamp_max
 
-    def _ensure_state(self, B: int, device, dtype):
-        shape_mismatch = (self.in_state.ndim != 2) or (self.in_state.shape != (B, self.num_cells))
-        if shape_mismatch:
-            # Preserve existing state where available and only initialize new rows.
-            prev_in = self.in_state if self.in_state.ndim == 2 else None
-            prev_out = self.out_state if self.out_state.ndim == 2 else None
-
-            new_in = torch.full((B, self.num_cells), self._init_E, device=device, dtype=dtype)
-            new_out = torch.full((B, self.num_cells), self._init_O, device=device, dtype=dtype)
-
-            if prev_in is not None:
-                rows_to_copy = min(B, prev_in.shape[0])
-                new_in[:rows_to_copy] = prev_in[:rows_to_copy].to(device=device, dtype=dtype)
-            if prev_out is not None:
-                rows_to_copy = min(B, prev_out.shape[0])
-                new_out[:rows_to_copy] = prev_out[:rows_to_copy].to(device=device, dtype=dtype)
-
-            self.in_state = new_in
-            self.out_state = new_out
-        else:
-            # Ensure buffers live on the requested device/dtype without altering values.
-            if self.in_state.device != device or self.in_state.dtype != dtype:
-                self.in_state = self.in_state.to(device=device, dtype=dtype)
-            if self.out_state.device != device or self.out_state.dtype != dtype:
-                self.out_state = self.out_state.to(device=device, dtype=dtype)
-
-    @torch.no_grad()
-    def reset_state(self, B: int = None, device=None, dtype=None):
-        if B is not None:
-            self._ensure_state(B, device or self.in_state.device, dtype or self.in_state.dtype)
-        self.in_state.fill_(self._init_E)
-        self.out_state.fill_(self._init_O)
-        self.in_state  = self.in_state.detach()
-        self.out_state = self.out_state.detach()
-    
-    def detach(self):
-        """  
-            Detaches states tensors from graph, intended to be used while learning
-        """
-        self.in_state = self.in_state.detach()
-        self.out_state = self.out_state.detach()
 
     def _compute_gj_sum(self, gj_bundle, o_pre: torch.Tensor, current_in_state: torch.Tensor = None) -> torch.Tensor:
         src, dst, w = gj_bundle
@@ -146,14 +97,12 @@ class FIURIModule(nn.Module):
 
         B = o_pre.size(0)
         Oj = o_pre[:, src]              # (B, E_gj)
-        print(f"o_pre {o_pre}")
         # Use current state if provided, otherwise fall back to self.in_state
         En_state = current_in_state if current_in_state is not None else self.in_state
         En = En_state[:, dst]          # (B, E_gj)
         
         sgn = torch.where(Oj >= En, 1.0, -1.0)
         contrib = Oj * w * sgn          # (B, E_gj)
-        print(f"contrib: {contrib}")
 
         out = En_state.new_zeros(B, self.num_cells)
         _scatter_add_batched(contrib, dst, out)
@@ -172,19 +121,18 @@ class FIURIModule(nn.Module):
         D = self.decay
         
         eps = 1e-6
-        eqE = (S - self.in_state).abs() <= eps
+        eqE = (S - E).abs() <= eps
 
         gt = S > T
         mask = (~gt) & eqE
 
         new_o = F.relu(S - T)
-        new_e = torch.where(S > T, new_o, torch.where(mask, self.in_state - D, S))
+        new_e = torch.where(S > T, new_o, torch.where(mask, E - D, S))
 
         return new_o, (new_e, new_o)
 
     def forward(self, chem_influence, state = None, gj_bundle = None, o_pre = None) -> torch.Tensor:
         B = chem_influence.size(0)
-        self._ensure_state(B, chem_influence.device, chem_influence.dtype)
         
         # Extract current state for use in gap junction computation
         E, O = state if state else (self._init_E, self._init_O)
@@ -212,128 +160,6 @@ class FIURIModule(nn.Module):
         new_e = torch.where(S > T, new_o, torch.where(mask, E - D, S))
 
         return new_o, (new_e, new_o)
-
-    @torch.no_grad()
-    def set_internal_state(
-        self,
-        in_s: torch.Tensor | np.ndarray,
-        *,
-        B: int | None = None,
-        batch: int | slice | list | torch.Tensor | None = None,
-        clone: bool = True,
-    ):
-        """
-        Set the internal state E.
-        Args:
-          in_s:  shape (n,) or (B, n). numpy or torch.
-          B:     batch size to (re)allocate if state not yet allocated. Ignored if state already (B,n) or in_s is (B,n).
-          batch: select which batch rows to set when in_s is (n,). If None, broadcasts to all rows.
-          clone: if True, copies data into buffers (recommended).
-        """
-        # Convert to tensor
-        if not torch.is_tensor(in_s):
-            in_s = torch.as_tensor(in_s)
-
-        # Determine target B and allocate if needed
-        current_B = self.in_state.shape[0] if self.in_state.ndim == 2 else None
-        if in_s.ndim == 2:
-            B_target, n = in_s.shape
-            if n != self.num_cells:
-                raise ValueError(f"in_s has wrong n: got {n}, expected {self.num_cells}")
-            self._ensure_state(B_target, in_s.device, in_s.dtype)
-            if clone:
-                self.in_state.copy_(in_s)
-            else:
-                self.in_state = in_s
-            return
-
-        if in_s.ndim != 1 or in_s.shape[0] != self.num_cells:
-            raise ValueError(f"in_s must be (n,) or (B,n). Got {tuple(in_s.shape)}; n={self.num_cells}")
-
-        # Figure out B to use
-        if current_B is None:
-            B_effective = B if B is not None else 1
-            self._ensure_state(B_effective, in_s.device, in_s.dtype)
-        else:
-            B_effective = current_B
-            # ensure device/dtype
-            if self.in_state.device != in_s.device or self.in_state.dtype != in_s.dtype:
-                in_s = in_s.to(device=self.in_state.device, dtype=self.in_state.dtype)
-
-        # Assign: either broadcast to all rows or selective rows
-        if batch is None:
-            if clone:
-                self.in_state.copy_(in_s.view(1, -1).expand(B_effective, -1))
-            else:
-                self.in_state = in_s.view(1, -1).expand(B_effective, -1)
-        else:
-            self.in_state[batch] = in_s  # broadcasting to selected rows is fine
-
-        self.in_state = self.in_state.detach()
-
-
-    @torch.no_grad()
-    def set_output_state(
-        self,
-        out_s: torch.Tensor | np.ndarray,
-        *,
-        B: int | None = None,
-        batch: int | slice | list | torch.Tensor | None = None,
-        clone: bool = True,
-    ):
-        """
-        Set the output state O.
-        Args:
-          out_s: shape (n,) or (B, n). numpy or torch.
-          B:     batch size to (re)allocate if state not yet allocated. Ignored if state already (B,n) or out_s is (B,n).
-          batch: select which batch rows to set when out_s is (n,). If None, broadcasts to all rows.
-          clone: if True, copies data into buffers (recommended).
-        """
-        if not torch.is_tensor(out_s):
-            out_s = torch.as_tensor(out_s)
-
-        current_B = self.out_state.shape[0] if self.out_state.ndim == 2 else None
-        if out_s.ndim == 2:
-            B_target, n = out_s.shape
-            if n != self.num_cells:
-                raise ValueError(f"out_s has wrong n: got {n}, expected {self.num_cells}")
-            self._ensure_state(B_target, out_s.device, out_s.dtype)
-            if clone:
-                self.out_state.copy_(out_s)
-            else:
-                self.out_state = out_s
-            return
-
-        if out_s.ndim != 1 or out_s.shape[0] != self.num_cells:
-            raise ValueError(f"out_s must be (n,) or (B,n). Got {tuple(out_s.shape)}; n={self.num_cells}")
-
-        # Determine B
-        if current_B is None:
-            B_effective = B if B is not None else 1
-            self._ensure_state(B_effective, out_s.device, out_s.dtype)
-        else:
-            B_effective = current_B
-            if self.out_state.device != out_s.device or self.out_state.dtype != out_s.dtype:
-                out_s = out_s.to(device=self.out_state.device, dtype=self.out_state.dtype)
-
-        # Assign
-        if batch is None:
-            if clone:
-                self.out_state.copy_(out_s.view(1, -1).expand(B_effective, -1))
-            else:
-                self.out_state = out_s.view(1, -1).expand(B_effective, -1)
-        else:
-            self.out_state[batch] = out_s
-
-        self.out_state = self.out_state.detach()
-
-    def get_state(self) -> dict:
-        return {
-            "in_state":self.in_state,
-            "out_state": self.out_state,
-            "threshold": self.threshold,
-            "decay_factor": self.decay,
-        }
     
 
 class FiuriDenseConn(nn.Module):

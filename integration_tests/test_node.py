@@ -47,7 +47,7 @@ influence_trace = torch.zeros(time_steps, dtype=torch.float32)
 csv_data = []
 
 # Initialize state
-current_state = None
+current_state = (0.0,0.0)
 
 # Run simulation
 print("Running simulation...")
@@ -73,7 +73,7 @@ for t in range(time_steps):
         gj_current=0.0
 
     # Get current internal state (E) before forward pass
-    E_before = fiuri.in_state.item() if current_state is None else current_state[0].item()
+    E_before = current_state[0]
 
     # Prepare inputs for FIURIModule.forward
     # API: forward(chem_influence, state=None, gj_bundle=None, o_pre=None)
@@ -97,11 +97,10 @@ for t in range(time_steps):
     influence_trace[t] = current_stimulus + gj_current
     
     # Step FIURI module - returns (new_o, (new_e, new_o_state))
-    new_o, new_state = fiuri.forward(chem_influence, state=current_state, gj_bundle=gj_bundle, o_pre=o_pre)
-    
-    # Update module's internal state buffers (needed for next iteration)
-    fiuri.in_state = new_state[0]  # new internal state
-    fiuri.out_state = new_state[1]  # new output state
+    new_o, new_state = fiuri.forward(chem_influence, 
+                                     state=current_state, 
+                                     gj_bundle=gj_bundle, 
+                                     o_pre=o_pre)
     
     # Update state for next iteration
     current_state = new_state
@@ -137,7 +136,7 @@ ax1.set_ylabel('State Value')
 ax1.legend()
 ax1.grid()
 
-ax2.plot(influence_trace.numpy())
+ax2.plot(influence_trace.detach().numpy())
 ax2.set_title('Input Currents')
 ax2.set_xlabel('Time Steps')
 ax2.set_ylabel('Current Value')
