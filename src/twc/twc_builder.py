@@ -1,11 +1,14 @@
 import json
 import os
+from typing import Callable
+
 import torch
 from torch import nn
-from utils.w_builder import build_tw_matrices
-from PyURI_module import FIURIModule, FiuriDenseConn, FiuriSparseGJConn
-from typing import Callable
-json_path = os.path.join(os.path.dirname(__file__),"TWC_fiu.json")
+
+from fiuri import FIURIModule, FiuriDenseConn, FiuriSparseGJConn
+from .w_builder import build_tw_matrices
+
+json_path = os.path.join(os.path.dirname(__file__), "TWC_fiu.json")
 
 def create_layer(n_neurons) -> FIURIModule:
     """  

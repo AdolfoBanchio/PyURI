@@ -14,14 +14,13 @@
     weights fixed to 1.0 for simplicity.
     Plot the internal and output sates of the neuron.
 """
-import sys
-import os
-sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
-
-import torch
-from PyURI_module import FIURIModule
-import matplotlib.pyplot as plt
 import csv
+import os
+
+import matplotlib.pyplot as plt
+import torch
+
+from fiuri import FIURIModule
 
 
 time_steps = 50

@@ -1,18 +1,22 @@
 import argparse
 import csv
 import os
+import sys
 from datetime import datetime
 from pathlib import Path
 from typing import Optional
 
 import gymnasium as gym
-from gymnasium.wrappers import RecordVideo
 import numpy as np
 import torch
+from gymnasium.wrappers import RecordVideo
 
-from utils.MLP_models import Actor
-from utils.twc_builder import build_twc
-from utils.twc_io import mcc_obs_encoder, twc_out_2_mcc_action
+SRC_ROOT = Path(__file__).resolve().parents[1] / "src"
+if str(SRC_ROOT) not in sys.path:
+    sys.path.insert(0, str(SRC_ROOT))
+
+from mlp import Actor
+from twc import mcc_obs_encoder, twc_out_2_mcc_action, build_twc
 
 ENV = "MountainCarContinuous-v0"
 SEED = 42
@@ -29,7 +33,7 @@ def get_actor(model_path: str, env: gym.Env, hidden_sizes=None) -> torch.nn.Modu
 
     if "twc" in model_path.name.lower():
         actor = build_twc(
-            obs_encoder=mcc_obs_encoder, action_decoder=twc_out_2_mcc_action, log_stats=False
+            obs_encoder=mcc_obs_encoder, action_decoder=twc_out_2_mcc_action, log_stats=False, internal_steps=3
         )
     else:
         state_dim = env.observation_space.shape[0]

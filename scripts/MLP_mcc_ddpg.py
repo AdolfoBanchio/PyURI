@@ -1,17 +1,22 @@
+import json
+import os
+import sys
+from datetime import datetime
+from pathlib import Path
+
 import gymnasium as gym
 import numpy as np
 import torch
-import torch.nn as nn
 import torch.optim as optim
-import torch.nn.functional as F
-from DDPG_engine.ddpg_engine import DDPGEngine
-from DDPG_engine.replay_buffer import ReplayBuffer
-from utils.MLP_models import Actor, Critic
-from tqdm import tqdm
 from torch.utils.tensorboard import SummaryWriter
-from datetime import datetime
-import os
-import json
+from tqdm import tqdm
+
+SRC_ROOT = Path(__file__).resolve().parents[1] / "src"
+if str(SRC_ROOT) not in sys.path:
+    sys.path.insert(0, str(SRC_ROOT))
+
+from ddpg import DDPGEngine, ReplayBuffer
+from mlp import Actor, Critic
 
 # Algorithm and hyperparams based on
 # https://arxiv.org/pdf/1509.02971
