@@ -1,8 +1,12 @@
+import sys
+from pathlib import Path
+SRC_ROOT = Path(__file__).resolve().parents[1] / "src"
+if str(SRC_ROOT) not in sys.path:
+    sys.path.insert(0, str(SRC_ROOT))
+
 import json
 import os
-import sys
 from datetime import datetime
-from pathlib import Path
 
 import gymnasium as gym
 import numpy as np
@@ -11,11 +15,9 @@ import torch.optim as optim
 from torch.utils.tensorboard import SummaryWriter
 from tqdm import tqdm
 
-SRC_ROOT = Path(__file__).resolve().parents[1] / "src"
-if str(SRC_ROOT) not in sys.path:
-    sys.path.insert(0, str(SRC_ROOT))
 
-from ddpg import DDPGEngine, ReplayBuffer
+from ddpg import DDPGEngine
+from utils import ReplayBuffer, OUNoise
 from mlp import Critic
 from twc import (
     build_twc,
@@ -74,10 +76,6 @@ params = {
 }
 
 # --- HELPER FUNCTIONS ---
-def sigma_for_episode(ep, start=SIGMA_START, end=SIGMA_END, decay_episodes=SIGMA_DECAY_EPIS):
-    frac = min(1.0, ep / decay_episodes)
-    return start + (end - start) * frac
-
 @torch.no_grad()
 def evaluate_policy(env, ddpg: DDPGEngine, episodes=10):
     ddpg.actor.eval()
@@ -95,24 +93,6 @@ def evaluate_policy(env, ddpg: DDPGEngine, episodes=10):
             done = terminated or truncated
     ddpg.actor.train()
     return (total / episodes), np.mean(eval_actions)
-
-class OUNoise:
-    def __init__(self,action_dimension,mu=0, theta=0.15, sigma=0.2):
-        self.action_dimension = action_dimension
-        self.mu = mu
-        self.theta = theta
-        self.sigma = sigma
-        self.state = np.ones(self.action_dimension) * self.mu
-        self.reset()
-
-    def reset(self):
-        self.state = np.ones(self.action_dimension) * self.mu
-
-    def noise(self):
-        x = self.state
-        dx = self.theta * (self.mu - x) + self.sigma * np.random.randn(len(x))
-        self.state = x + dx
-        return self.state
     
 # -------------------------
 
@@ -139,7 +119,12 @@ replay_buf = ReplayBuffer(obs_dim=env.observation_space.shape[0],
                           size=100_000,
                           keep=WARMUP_STEPS)
 
-ou_noise = OUNoise(action_dimension=env.action_space.shape[0])
+ou_noise = OUNoise(action_dimension=env.action_space.shape[0],
+                   mu=0,
+                   theta=0.15,
+                   sigma=SIGMA_START,
+                   sigma_end=SIGMA_END,
+                   sigma_decay_epis=SIGMA_DECAY_EPIS)
 
 actor_opt = torch.optim.Adam(actor.parameters(),  lr=ACTOR_LR)
 critic_opt= torch.optim.Adam(critic.parameters(), lr=CRITIC_LR)
@@ -164,7 +149,7 @@ total_steps = 0
 # Create a unique run directory with timestamp
 timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
 run_name = f"twc_ddpg_{timestamp}"
-writer = SummaryWriter(f'runs/{run_name}')
+writer = SummaryWriter(f'runs/ddpg/{run_name}')
 
 os.makedirs(writer.log_dir, exist_ok=True)
 params_path = os.path.join(writer.log_dir, "params.json")
@@ -173,7 +158,7 @@ with open(params_path, "w") as f:
 
 for e in tqdm(range(MAX_EPISODE)):
     obs, _ = env.reset()
-    ou_noise.sigma = sigma_for_episode(e)
+    ou_noise.update_sigma()
     ou_noise.reset()    
     ep_reward = 0
     steps = 0
