@@ -1,3 +1,4 @@
+import itertools
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -140,7 +141,9 @@ class TD3Engine():
         self.total_updates += 1
         if self.total_updates % self.policy_delay == 0:
             
-            actor_loss = -self.critic_1(obs, self.actor(obs)).mean()
+            a = self.actor(obs)
+
+            actor_loss = -self.critic_1(obs, a).mean()
             
             self.actor_optimizer.zero_grad(set_to_none=True)
             actor_loss.backward()
@@ -158,6 +161,130 @@ class TD3Engine():
             actor_loss_r = actor_loss.item()
             
         return actor_loss_r , critic_loss.item()
+
+    def update_step_bptt(self, batch_of_sequences: dict, burn_in_length: int):
+        """
+        Performs a single update step for both actor and critic networks
+        using Truncated Backpropagation Through Time (BPTT).
+        """
+        
+        # 1. Get sequence data and dimensions
+        obs_seq = batch_of_sequences['obs'].to(self.device)
+        act_seq = batch_of_sequences['action'].to(self.device)
+        rew_seq = batch_of_sequences['reward'].to(self.device)
+        obs2_seq = batch_of_sequences['next_obs'].to(self.device)
+        term_seq = batch_of_sequences['done'].to(self.device) # Use 'done' from buffer
+
+        B, L, _ = obs_seq.shape
+        train_length = L - burn_in_length
+        assert train_length > 0, "Sequence length must be > burn_in_length"
+
+        # 2. Burn-in Phase (No Gradients) and with initial states
+        self.actor.reset()
+        self.actor_target.reset()
+        with torch.no_grad():
+            for t in range(burn_in_length):
+                _ = self.actor(obs_seq[:, t, :])
+                _ = self.actor_target(obs2_seq[:, t, :])
+
+        # Detach internal states graphs to stop gradients from flowing into the burn-in period.
+        """ if hasattr(self.actor, 'detach'):
+            self.actor.detach()
+            self.actor_target.detach() """
+
+        # 4. Training Phase (With Gradients)
+        all_critic_losses = []
+        
+        # Take a snapshot of actor state right after burn-in
+        actor_state_snapshot = None
+        if hasattr(self.actor, "_state") and self.actor._state is not None:
+            actor_state_snapshot = {k: (v[0].clone(), v[1].clone()) for k, v in self.actor._state.items()}
+
+        for t in range(burn_in_length, L):
+            # Get data for this time step
+            obs_t = obs_seq[:, t, :]
+            act_t = act_seq[:, t, :]
+            rew_t = rew_seq[:, t]
+            obs2_t = obs2_seq[:, t, :]
+            term_t = term_seq[:, t]
+            # Ensure shapes are (B, 1) to avoid broadcasting to (B, B)
+            rew_t = rew_t.unsqueeze(1)
+            mask_t = (1.0 - term_t).unsqueeze(1)
+
+            # --- 4.1. Compute Targets ---
+            with torch.no_grad():
+                noise = (torch.randn_like(act_t) * self.target_policy_noise).clamp(-self.target_noise_clip,
+                                                                                self.target_noise_clip)
+                
+                # Get next action from target actor, passing the recurrent state
+                next_a_t = self.actor_target(obs2_t)
+                next_a_t = (next_a_t + noise).clamp(self.action_low, self.action_high)
+                
+                # Critics are stateless
+                q1_t = self.critic_1_target(obs2_t, next_a_t)
+                q2_t = self.critic_2_target(obs2_t, next_a_t)
+                min_q = torch.minimum(q1_t, q2_t)
+                
+                q_target = rew_t + self.gamma * mask_t * min_q
+
+            # --- 4.2. Update Critic ---
+            q1 = self.critic_1(obs_t, act_t)
+            q2 = self.critic_2(obs_t, act_t)
+            critic_loss_t = F.mse_loss(q1, q_target) + F.mse_loss(q2, q_target)
+            all_critic_losses.append(critic_loss_t)
+
+            # Do not compute actor loss here; we will do a clean pass after critic update
+
+        # 5. Backpropagate (BPTT)
+        self.critic_optimizer.zero_grad(set_to_none=True)
+        critic_loss = torch.stack(all_critic_losses).mean()
+        critic_loss.backward()
+        # Clip gradients - ESSENTIAL for recurrent networks
+        torch.nn.utils.clip_grad_norm_(itertools.chain(self.critic_1.parameters(), self.critic_2.parameters()), 1.0)
+        self.critic_optimizer.step()
+
+        # --- Actor (every X steps) ---
+        actor_loss = None
+        self.total_updates += 1
+        if self.total_updates % self.policy_delay == 0:
+            # Restore actor state to the snapshot for a fresh unroll
+            if actor_state_snapshot is not None:
+                self.actor._state = {k: (v[0].clone(), v[1].clone()) for k, v in actor_state_snapshot.items()}
+
+            # Temporarily freeze critic params so they are treated as constants
+            for p in self.critic_1.parameters():
+                p.requires_grad_(False)
+
+            all_actor_losses = []
+            for t in range(burn_in_length, L):
+                obs_t = obs_seq[:, t, :]
+                a_t = self.actor(obs_t)
+                q_val = self.critic_1(obs_t, a_t)
+                all_actor_losses.append(-q_val.mean())
+
+            actor_loss = torch.stack(all_actor_losses).mean()
+
+            # Restore critic params to require grad for future critic updates
+            for p in self.critic_1.parameters():
+                p.requires_grad_(True)
+
+            self.actor_optimizer.zero_grad(set_to_none=True)
+            actor_loss.backward()
+            torch.nn.utils.clip_grad_norm_(self.actor.parameters(), 1.0)
+            self.actor_optimizer.step()
+
+            # Soft-update targets
+            self.soft_update(net=self.actor, target_net=self.actor_target)
+            self.soft_update(net=self.critic_1,  target_net=self.critic_1_target)
+            self.soft_update(net=self.critic_2,  target_net=self.critic_2_target)
+
+        if actor_loss is None:
+            actor_loss_r = float('nan')
+        else:
+            actor_loss_r = actor_loss.item()
+            
+        return actor_loss_r , critic_loss.item()
+
 
     @torch.no_grad()
     def evaluate_policy(self,env, episodes=10):

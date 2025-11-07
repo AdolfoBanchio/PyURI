@@ -1,5 +1,9 @@
+import sys
+from pathlib import Path
+SRC_ROOT = Path(__file__).resolve().parents[1] / "src"
+if str(SRC_ROOT) not in sys.path:
+    sys.path.insert(0, str(SRC_ROOT))
 import os
-
 import matplotlib.pyplot as plt
 import torch
 
@@ -16,7 +20,7 @@ from twc import (
 
 
 def main():
-    out_dir = os.path.join(os.path.dirname(__file__), 'out')
+    out_dir = os.path.join('out/tests/test_twc')
     os.makedirs(out_dir, exist_ok=True)
 
     # Build TWC for MCC with logging enabled

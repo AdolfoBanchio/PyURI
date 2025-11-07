@@ -149,7 +149,7 @@ total_steps = 0
 # Create a unique run directory with timestamp
 timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
 run_name = f"twc_ddpg_{timestamp}"
-writer = SummaryWriter(f'runs/ddpg/{run_name}')
+writer = SummaryWriter(f'out/runs/ddpg/{run_name}')
 
 os.makedirs(writer.log_dir, exist_ok=True)
 params_path = os.path.join(writer.log_dir, "params.json")
@@ -210,16 +210,16 @@ for e in tqdm(range(MAX_EPISODE)):
         print(f"Evaluation after Episode {e+1}: {eval_ret:.2f}")
         if eval_ret > best_ret:
             best_ret = eval_ret
-            torch.save(ddpg.actor.state_dict(), f"models/twc_ddpg_actor_best_{timestamp}.pth")
-            torch.save(ddpg.critic.state_dict(), f"models/twc_ddpg_critic_best_{timestamp}.pth")
+            torch.save(ddpg.actor.state_dict(), f"out/models/twc_ddpg_actor_best_{timestamp}.pth")
+            torch.save(ddpg.critic.state_dict(), f"out/models/twc_ddpg_critic_best_{timestamp}.pth")
             print(f"New best evaluation reward: {best_ret:.2f}, models saved.")
 
 print("Training completed.")
 
 env.close()
 # save final models
-torch.save(ddpg.actor.state_dict(), f"models/twc_ddpg_final_{timestamp}.pth")
-torch.save(ddpg.critic.state_dict(), f"models/twc_ddpg_critic_final_{timestamp}.pth")
+torch.save(ddpg.actor.state_dict(), f"out/models/twc_ddpg_final_{timestamp}.pth")
+torch.save(ddpg.critic.state_dict(), f"out/models/twc_ddpg_critic_final_{timestamp}.pth")
 
 # Close tensorboard writer
 writer.close()

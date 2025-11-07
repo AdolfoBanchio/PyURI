@@ -134,16 +134,17 @@ def build_twc(obs_encoder: Callable,
             ex_in, in_in = self.obs_encoder(x, n_inputs=4, device=device)            
             B = ex_in.size(0)
             dtype = ex_in.dtype
-            state = self._ensure_state(B, device, dtype)
+            current_state = self._ensure_state(B, device, dtype)
             
-            if self.training and self._state is not None:
-                state = {name: (pair[0].detach(), pair[1].detach()) for name, pair in state.items()}
-
-            in_state = state["in"]
+            state = {}
+            # Clone states to avoid in-place modifications on tensors needed for autograd
+            in_state_cur = current_state["in"]
+            in_state = (in_state_cur[0].clone(), in_state_cur[1].clone())
             in_out, new_in_state = self.in_layer(ex_in + in_in, state=in_state)
             state["in"] = new_in_state
 
-            hid_state = state["hid"]
+            hid_state_cur = current_state["hid"]
+            hid_state = (hid_state_cur[0].clone(), hid_state_cur[1].clone())
             hid_out = None
             
             for _ in range(self.internal_steps):
@@ -164,13 +165,17 @@ def build_twc(obs_encoder: Callable,
                 )
                 state["hid"] = hid_state
                 # just perform an internal step without external influence
-                in_out, new_in_state = self.in_layer.neuron_step(state=state["in"]) 
-                state["in"] = new_in_state
+                #in_out, new_in_state = self.in_layer.neuron_step(state=state["in"]) 
+                #state["in"] = new_in_state
 
             
             # --- hidden -> output (EX only)
             hid2out_ex_influence = self.hid2out(hid_out)
-            out_state, out_layer_state = self.out_layer(hid2out_ex_influence, state=state["out"])
+            out_state_cur = current_state["out"]
+            out_state, out_layer_state = self.out_layer(
+                hid2out_ex_influence,
+                state=(out_state_cur[0].clone(), out_state_cur[1].clone())
+            )
             state["out"] = out_layer_state
             self._state = state
             
@@ -189,10 +194,7 @@ def build_twc(obs_encoder: Callable,
             """  
                 Resets the state variables for each layer
             """
-            param = next(self.parameters())
-            device = param.device
-            dtype = param.dtype
-            self._state = self._make_state(batch_size=1, device=device, dtype=dtype)
+            self._state = None
         
         def detach(self):
             if self._state is not None:

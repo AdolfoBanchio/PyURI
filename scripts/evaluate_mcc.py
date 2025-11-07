@@ -2,13 +2,13 @@ import argparse
 import csv
 import os
 import sys
-from datetime import datetime
-from pathlib import Path
-from typing import Optional
-
 import gymnasium as gym
 import numpy as np
 import torch
+import matplotlib.pyplot as plt
+from datetime import datetime
+from pathlib import Path
+from typing import Optional
 from gymnasium.wrappers import RecordVideo
 
 SRC_ROOT = Path(__file__).resolve().parents[1] / "src"
@@ -20,7 +20,7 @@ from twc import mcc_obs_encoder, twc_out_2_mcc_action, build_twc
 
 ENV = "MountainCarContinuous-v0"
 SEED = 42
-DEFAULT_EPISODES = 1000
+DEFAULT_EPISODES = 100
 DEFAULT_ACTOR_HIDDEN = [400, 300]
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
@@ -113,6 +113,9 @@ def record_episode(
     if seed is None:
         return None
 
+    if hasattr(actor, "log"):
+        actor.log = True
+
     os.makedirs(video_dir, exist_ok=True)
     base_env = gym.make(ENV, render_mode="rgb_array")
     record_env = RecordVideo(
@@ -192,6 +195,39 @@ def write_report(
 
     return report_path
 
+def save_twc_plots(twc, out_dir="out/videos"):
+    # Extract monitor logs into (T, N) tensors per layer
+    monitor = twc.monitor
+    layers = ['in', 'hid', 'out']
+    series = {}
+    for L in layers:
+        in_states = torch.stack([step['in_state'][0] for step in monitor[L]], dim=0)  # (T, N)
+        out_states = torch.stack([step['out_state'][0] for step in monitor[L]], dim=0)  # (T, N)
+        series[L] = (in_states, out_states)
+
+    # Plot per-layer time series for in/out state of each neuron
+    for L in layers:
+        in_states, out_states = series[L]
+        N = in_states.shape[1]
+        fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(14, 6), sharex=True)
+        for i in range(N):
+            ax1.plot(in_states[:, i].cpu().numpy(), label=f'E_{i}')
+            ax2.plot(out_states[:, i].cpu().numpy(), label=f'O_{i}')
+        ax1.set_title(f'{L.upper()} layer: Internal state (E) per neuron')
+        ax2.set_title(f'{L.upper()} layer: Output state (O) per neuron')
+        ax2.set_xlabel('Time step')
+        ax1.set_ylabel('E')
+        ax2.set_ylabel('O')
+        ax1.grid(True, alpha=0.3)
+        ax2.grid(True, alpha=0.3)
+        # Keep legends compact
+        ax1.legend(ncol=max(1, N // 4), fontsize='small')
+        ax2.legend(ncol=max(1, N // 4), fontsize='small')
+        plt.tight_layout()
+        save_path = os.path.join(out_dir, f'twc_{L}_states.png')
+        plt.savefig(save_path)
+        plt.close(fig)
+        print(f'Saved {save_path}')
 
 def parse_args():
     parser = argparse.ArgumentParser(
@@ -213,7 +249,7 @@ def parse_args():
     parser.add_argument(
         "--videos-dir",
         type=str,
-        default="videos",
+        default="out/videos",
         help="Directory where evaluation videos will be stored.",
     )
     parser.add_argument(
@@ -248,6 +284,8 @@ def main():
     video_path = None
     if args.record_best:
         video_path = record_episode(model_path.stem, actor, metrics["best_seed"], videos_dir)
+        if "twc" in model_path.name.lower():
+            save_twc_plots(twc=actor, out_dir=videos_dir)
 
     report_path = write_report(metrics, model_path, reports_dir, video_path)
 

@@ -14,6 +14,12 @@
     weights fixed to 1.0 for simplicity.
     Plot the internal and output sates of the neuron.
 """
+import sys
+from pathlib import Path
+SRC_ROOT = Path(__file__).resolve().parents[1] / "src"
+if str(SRC_ROOT) not in sys.path:
+    sys.path.insert(0, str(SRC_ROOT))
+
 import csv
 import os
 
@@ -144,11 +150,14 @@ ax2.grid()
 
 plt.tight_layout()
 plt.show()
-save_path = os.path.join(os.path.dirname(__file__), "out/pyuri_dynamics.png")
+out_dir = "out/tests/test_node"
+os.makedirs(out_dir, exist_ok=True)
+
+save_path = os.path.join(f"{out_dir}/pyuri_dynamics.png")
 plt.savefig(save_path)
 
 # Write CSV file
-csv_path = os.path.join(os.path.dirname(__file__), "out/pyuri_dynamics.csv")
+csv_path = os.path.join(f"{out_dir}/pyuri_dynamics.csv")
 with open(csv_path, 'w', newline='') as csvfile:
     fieldnames = ['time_step', 'inh_inf', 'exc_inf', 'gj_inf', 'current_influence', 'current_stimulus', 'output_state_O', 'internal_state_E']
     writer = csv.DictWriter(csvfile, fieldnames=fieldnames)
