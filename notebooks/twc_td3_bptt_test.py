@@ -1,7 +1,8 @@
 # %%
 import sys
+import sys
 from pathlib import Path
-SRC_ROOT = "../src"
+SRC_ROOT = Path(__file__).resolve().parents[1] / "src"
 if str(SRC_ROOT) not in sys.path:
     sys.path.insert(0, str(SRC_ROOT))
 
@@ -18,6 +19,7 @@ import json
 import os
 from typing import Callable
 from torch import nn
+from torch.utils.tensorboard import SummaryWriter
 from fiuri import FIURIModule, FiuriDenseConn, FiuriSparseGJConn
 from twc.w_builder import build_tw_matrices
 
@@ -240,7 +242,7 @@ def create_layer(n_neurons) -> FIURIModule:
         clamp_max=10.0,
     )
 
-json_path = "TWC_fiu.json"
+json_path = "notebooks/TWC_fiu.json"
 
 def build_twc(obs_encoder: Callable,
               action_decoder: Callable,
@@ -451,13 +453,15 @@ def soft_update(target, source, tau):
 
 @torch.no_grad()
 def evaluate_policy(eval_env, actor_net, n_episodes=10):
-    """Runs a policy evaluation loop."""
-    actor_net.eval() # Set model to eval mode
+    """Runs a policy evaluation loop and returns (avg_return, avg_steps)."""
+    actor_net.eval()  # Set model to eval mode
     total_reward = 0.0
+    total_steps = 0
     for _ in range(n_episodes):
         obs, _ = eval_env.reset()
-        actor_net.reset() # Reset the internal state for evaluation
+        actor_net.reset()  # Reset the internal state for evaluation
         done = False
+        steps = 0
         while not done:
             # Use the stateful get_action_from_obs
             action_tensor = actor_net.get_action_from_obs(
@@ -466,9 +470,13 @@ def evaluate_policy(eval_env, actor_net, n_episodes=10):
             action = action_tensor.squeeze(0).cpu().numpy()
             obs, reward, terminated, truncated, _ = eval_env.step(action)
             total_reward += reward
+            steps += 1
             done = terminated or truncated
-    actor_net.train() # Set model back to train mode
-    return total_reward / n_episodes
+        total_steps += steps
+    actor_net.train()  # Set model back to train mode
+    avg_return = total_reward / n_episodes
+    avg_steps = total_steps / n_episodes
+    return avg_return, avg_steps
 
 
 # ---
@@ -525,6 +533,16 @@ print(f"Networks initialized. Running on {DEVICE}.")
 
 
 # --- Populate Buffer ---
+from datetime import datetime
+timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+run_name = f"twc_td3_bptt_test_{timestamp}" # Added _bptt
+log_dir = os.path.join("out", "runs", run_name)
+os.makedirs(log_dir, exist_ok=True)
+writer = SummaryWriter(log_dir=log_dir)
+
+train_returns = []
+train_steps = []
+
 print(f"Populating buffer with {WARMUP_STEPS} random steps...")
 obs, _ = env.reset()
 actor.reset() # Reset stateful actor
@@ -674,18 +692,27 @@ for ep in range(MAX_EPISODE):
             
     # --- End of Episode ---
     print(f"Ep: {ep+1} | Total Steps: {total_steps} | Reward: {ep_reward:.2f}")
+    # Log training metrics to TensorBoard
+    train_returns.append(ep_reward)
+    train_steps.append(ep_steps)
+    avg_train_return = float(np.mean(train_returns))
+    writer.add_scalar("train/avg_return", avg_train_return, ep + 1)
+    writer.add_scalar("train/steps", ep_steps, ep + 1)
 
     if (ep+1) % 10 == 0:
-        eval_reward = evaluate_policy(eval_env, actor, n_episodes=10)
+        eval_avg_return, eval_avg_steps = evaluate_policy(eval_env, actor, n_episodes=10)
+        # Log evaluation metrics to TensorBoard
+        writer.add_scalar("eval/avg_return", eval_avg_return, ep + 1)
+        writer.add_scalar("eval/avg_steps", eval_avg_steps, ep + 1)
         print(f"----------------------------------------")
-        print(f"Evaluation after {ep+1} episodes: {eval_reward:.2f}")
+        print(f"Evaluation after {ep+1} episodes: {eval_avg_return:.2f} (avg steps: {eval_avg_steps:.1f})")
         print(f"----------------------------------------")
 
 env.close()
 eval_env.close()
+writer.close()
 print("--- Training Complete ---")
 
+torch.save(actor.state_dict(), f"out/models/twc_td3_bptt_test_final_{timestamp}.pth")
+
 # %%
-
-
-
