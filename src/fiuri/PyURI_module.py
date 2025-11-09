@@ -101,7 +101,8 @@ class FIURIModule(nn.Module):
         En_state = current_in_state if current_in_state is not None else self.in_state
         En = En_state[:, dst]          # (B, E_gj)
         
-        sgn = torch.where(Oj >= En, 1.0, -1.0)
+        sgn = torch.where(Oj > En, 1.0, 
+                          torch.where(Oj < En, -1.0, 0))
         contrib = Oj * w * sgn          # (B, E_gj)
 
         out = En_state.new_zeros(B, self.num_cells)
@@ -151,7 +152,7 @@ class FIURIModule(nn.Module):
         
         eps = 1e-6
         eqE = (S - E).abs() <= eps
-        #eqE = S == E 
+        eqE = S == E 
 
         gt = S > T
         mask = (~gt) & eqE

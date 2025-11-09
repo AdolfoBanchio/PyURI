@@ -122,21 +122,21 @@ class Neuron:
         for dc in dendriticConnections:
             sourceOutState = dc.getSource().getOutputState()
             if dc.isType(con.ConnectionType.ChemEx):
-                print('exc inf:',sourceOutState)
+                #print('exc inf:',sourceOutState)
                 currInfluence = currInfluence + dc.getTestWeight()*sourceOutState
             elif dc.isType(con.ConnectionType.ChemIn):
-                print('inh inf:',sourceOutState)
+                #print('inh inf:',sourceOutState)
                 currInfluence = currInfluence - dc.getTestWeight()*sourceOutState
             else:
                 if(sourceOutState<self.internalstate):
                     currInfluence = currInfluence - dc.getTestWeight() * sourceOutState
-                    print('gj inf:',-sourceOutState)
+                    #print('gj inf:',-sourceOutState)
                 elif(sourceOutState>self.internalstate):
                     currInfluence = currInfluence + dc.getTestWeight() * sourceOutState
-                    print('gj inf:',-sourceOutState)
-        print('current influence (sum Ij):', currInfluence)
+                    #print('gj inf:',-sourceOutState)
+        #print('current influence (sum Ij):', currInfluence)
         currState=self.internalstate+currInfluence
-        print('current stimulus (instate + Ij)', currState)
+        #print('current stimulus (instate + Ij)', currState)
         if currState < -10:
             currState = -10
         elif currState > 10:

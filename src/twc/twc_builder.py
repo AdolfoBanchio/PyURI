@@ -1,5 +1,6 @@
 import json
 import os
+import math
 from typing import Callable
 
 import torch
@@ -225,5 +226,19 @@ def build_twc(obs_encoder: Callable,
             self.monitor["hid"].append(_pack(self.hid_layer, state["hid"]))
             self.monitor["out"].append(_pack(self.out_layer, state["out"]))
 
+        def _set_all_weights_to_one(self):
+            """Force every learnable connection weight to produce 1 after softplus."""
+            softplus_inv_one = math.log(math.e - 1.0)
+            with torch.no_grad():
+                dense_conns = (
+                    self.in2hid_IN,
+                    self.hid_IN,
+                    self.hid_EX,
+                    self.hid2out,
+                )
+                for conn in dense_conns:
+                    conn.w.fill_(softplus_inv_one)
+                self.in2hid_GJ.gj_w.fill_(softplus_inv_one)
+        
 
     return TWC()
