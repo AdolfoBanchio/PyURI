@@ -1,6 +1,7 @@
 templates/
 runs/
 models/
+out/videos
 
 .python-version
 .github/
