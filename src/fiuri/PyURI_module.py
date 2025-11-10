@@ -90,24 +90,40 @@ class FIURIModule(nn.Module):
         self.clamp_max = clamp_max
 
 
-    def _compute_gj_sum(self, gj_bundle, o_pre: torch.Tensor, current_in_state: torch.Tensor = None) -> torch.Tensor:
+    def _compute_gj_sum(self, gj_bundle, o_pre: torch.Tensor, current_in_state: torch.Tensor, out_buffer: torch.Tensor) -> None:
+        """
+        Computes GJ sum and scatters it IN-PLACE into out_buffer.
+        """
         src, dst, w = gj_bundle
         if src.numel() == 0:
-            return (current_in_state if current_in_state is not None else self.in_state).new_zeros(current_in_state.shape if current_in_state is not None else self.in_state.shape)  # (B, n)
+            return  # No-op, out_buffer is unchanged
 
         B = o_pre.size(0)
         Oj = o_pre[:, src]              # (B, E_gj)
-        # Use current state if provided, otherwise fall back to self.in_state
-        En_state = current_in_state if current_in_state is not None else self.in_state
-        En = En_state[:, dst]          # (B, E_gj)
+        En = current_in_state[:, dst]   # (B, E_gj)
         
-        sgn = torch.where(Oj > En, 1.0, 
-                          torch.where(Oj < En, -1.0, 0))
+        # --- OPTIMIZATION 2: Use torch.sign ---
+        sgn = torch.sign(Oj - En)
         contrib = Oj * w * sgn          # (B, E_gj)
 
-        out = En_state.new_zeros(B, self.num_cells)
-        _scatter_add_batched(contrib, dst, out)
-        return out  # (B, n)
+        # --- OPTIMIZATION 1: Accumulate directly into the provided buffer ---
+        _scatter_add_batched(contrib, dst, out_buffer)
+        # No return value, as out_buffer is modified in-place
+
+    def _calculate_new_state(self, S, E, T, D):
+        """
+        --- OPTIMIZATION 3: Factored-out state update logic ---
+        Calculates new (E, O) state from S, E, T, and D.
+        """
+        # Match ariel's exact equality check: currState==self.internalstate
+        eqE = S == E
+
+        gt = S > T
+        mask = (~gt) & eqE
+
+        new_o = F.relu(S - T)
+        new_e = torch.where(S > T, new_o, torch.where(mask, E - D, S))
+        return new_o, (new_e, new_o)
 
     def neuron_step(self, state):
         """
@@ -117,19 +133,8 @@ class FIURIModule(nn.Module):
         E, O = state if state else (self._init_E, self._init_O)
         S = torch.clamp(E, self.clamp_min, self.clamp_max)
 
-        T = self.threshold    # differentiable parameters
-        D = self.decay
-        
-        # Match ariel's exact equality check: currState==self.internalstate
-        eqE = S == E
-
-        gt = S > T
-        mask = (~gt) & eqE
-
-        new_o = F.relu(S - T)
-        new_e = torch.where(S > T, new_o, torch.where(mask, E - D, S))
-
-        return new_o, (new_e, new_o)
+        # --- OPTIMIZATION 3: Use factored-out logic ---
+        return self._calculate_new_state(S, E, self.threshold, self.decay)
 
     def forward(self, chem_influence, state = None, gj_bundle = None, o_pre = None) -> torch.Tensor:
         B = chem_influence.size(0)
@@ -141,24 +146,21 @@ class FIURIModule(nn.Module):
             assert o_pre is not None, "o_pre must be provided when gj_bundle is not None"
             # Pass current state to gap junction computation
             current_E_tensor = E if isinstance(E, torch.Tensor) else torch.full((B, self.num_cells), E, dtype=chem_influence.dtype, device=chem_influence.device)
-            gj_sum = self._compute_gj_sum(gj_bundle, o_pre, current_in_state=current_E_tensor)  # (B, n)
-            chem_influence  = chem_influence + gj_sum          # (B, n)
+            
+            # --- OPTIMIZATION 1: Pass chem_influence as out_buffer ---
+            self._compute_gj_sum(
+                gj_bundle, 
+                o_pre, 
+                current_in_state=current_E_tensor, 
+                out_buffer=chem_influence
+            )
+            # chem_influence is now (original chem_influence + gj_sum)
         
+        # Note: E is still the *original* state[0]
         S = torch.clamp(E + chem_influence, self.clamp_min, self.clamp_max)
 
-        T = self.threshold    # differentiable parameters
-        D = self.decay
-        
-        # Match ariel's exact equality check: currState==self.internalstate
-        eqE = S == E
-
-        gt = S > T
-        mask = (~gt) & eqE
-
-        new_o = F.relu(S - T)
-        new_e = torch.where(S > T, new_o, torch.where(mask, E - D, S))
-
-        return new_o, (new_e, new_o)
+        # --- OPTIMIZATION 3: Use factored-out logic ---
+        return self._calculate_new_state(S, E, self.threshold, self.decay)
     
 
 class FiuriDenseConn(nn.Module):
