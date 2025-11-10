@@ -242,7 +242,7 @@ def create_layer(n_neurons) -> FIURIModule:
         clamp_max=10.0,
     )
 
-json_path = "notebooks/TWC_fiu.json"
+json_path = "TWC_fiu.json"
 
 def build_twc(obs_encoder: Callable,
               action_decoder: Callable,

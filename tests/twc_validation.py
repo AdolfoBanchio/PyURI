@@ -1,5 +1,6 @@
 import sys
 import json
+import math
 from pathlib import Path
 SRC_ROOT = Path(__file__).resolve().parents[1] / "src"
 if str(SRC_ROOT) not in sys.path:
@@ -7,13 +8,237 @@ if str(SRC_ROOT) not in sys.path:
 import os
 import matplotlib.pyplot as plt
 import torch
+import numpy as np
 import gymnasium as gym
 from twc.twc_builder import build_twc
-from twc.twc_io import mcc_obs_encoder, twc_out_2_mcc_action, POS_MAX, POS_MIN, VEL_MAX
+from twc.twc_io import mcc_obs_encoder, twc_out_2_mcc_action, POS_MAX, POS_MIN, VEL_MAX, MIN_STATE, MAX_STATE
 from ariel.Model import Model as FiuModel
+from ariel import Connection as con
 
 ENV = "MountainCarContinuous-v0"
 SEED = 42
+
+def extract_ariel_neuron_states(fiu_model):
+    """Extract all neuron internal and output states from ariel model."""
+    states = {}
+    for name in fiu_model.neuralnetwork.getNeuronNames():
+        neuron = fiu_model.getNeuron(name)
+        states[name] = {
+            'internal': neuron.getInternalState(),
+            'output': neuron.getOutputState(),
+            'threshold': neuron.getTestThreshold(),
+            'decay': neuron.getTestDecayFactor(),
+        }
+    return states
+
+def extract_ariel_connection_weights(fiu_model):
+    """Extract all connection weights from ariel model."""
+    weights = {}
+    for i, conn in enumerate(fiu_model.neuralnetwork.getConnections()):
+        src = conn.getSource().getName()
+        dst = conn.getTarget().getName()
+        conn_type = conn.connType
+        weight = conn.getTestWeight()
+        key = (src, dst, str(conn_type))
+        weights[key] = weight
+    return weights
+
+def extract_torch_neuron_states(twc, neuron_names_by_layer):
+    """Extract neuron states from PyTorch TWC."""
+    states = {}
+    if twc._state is None:
+        return states
+    
+    # Map layer states to neuron names
+    layer_map = {
+        'in': neuron_names_by_layer['input'],
+        'hid': neuron_names_by_layer['hidden'],
+        'out': neuron_names_by_layer['output'],
+    }
+    
+    for layer_name, names in layer_map.items():
+        if layer_name in twc._state:
+            E, O = twc._state[layer_name]
+            for idx, name in enumerate(names):
+                states[name] = {
+                    'internal': E[0, idx].item() if E.dim() > 1 else E[idx].item(),
+                    'output': O[0, idx].item() if O.dim() > 1 else O[idx].item(),
+                }
+    
+    # Extract thresholds and decays from layers
+    for layer_name, names in layer_map.items():
+        if layer_name == 'in':
+            layer = twc.in_layer
+        elif layer_name == 'hid':
+            layer = twc.hid_layer
+        elif layer_name == 'out':
+            layer = twc.out_layer
+        else:
+            continue
+            
+        for idx, name in enumerate(names):
+            if name not in states:
+                states[name] = {}
+            states[name]['threshold'] = layer.threshold[idx].item()
+            states[name]['decay'] = layer.decay[idx].item()
+    
+    return states
+
+def sync_weights_from_ariel_to_torch(fiu_model, twc, neuron_names_by_layer):
+    """Synchronize weights from ariel model to PyTorch TWC."""
+    ariel_weights = extract_ariel_connection_weights(fiu_model)
+    
+    # Get neuron index mappings
+    input_idx = {name: i for i, name in enumerate(neuron_names_by_layer['input'])}
+    hidden_idx = {name: i for i, name in enumerate(neuron_names_by_layer['hidden'])}
+    output_idx = {name: i for i, name in enumerate(neuron_names_by_layer['output'])}
+    
+    # Softplus inverse to set weights correctly
+    softplus_inv_one = math.log(math.e - 1.0)
+    
+    with torch.no_grad():
+        # Sync in2hid connections
+        for (src, dst, conn_type_str), weight in ariel_weights.items():
+            if src in input_idx and dst in hidden_idx:
+                src_i = input_idx[src]
+                dst_i = hidden_idx[dst]
+                
+                if 'ChemEx' in conn_type_str or 'ChemEx' == conn_type_str:
+                    # EX connection (should go to in2hid_EX if it exists, but TWC only has in2hid_IN)
+                    # Check if this connection should be EX or IN based on the mask
+                    # For now, we'll skip EX connections from input to hidden as TWC doesn't have in2hid_EX
+                    pass
+                elif 'ChemIn' in conn_type_str or 'ChemIn' == conn_type_str:
+                    # IN connection
+                    if hasattr(twc, 'in2hid_IN') and twc.in2hid_IN.w_mask[src_i, dst_i] > 0:
+                        # Set weight to produce desired value after softplus
+                        # Since softplus(w) * mask = weight, we need w such that softplus(w) = weight
+                        if weight > 0:
+                            w_inv = math.log(math.exp(weight) - 1.0) if weight < 20 else weight
+                            twc.in2hid_IN.w[src_i, dst_i] = w_inv
+        
+        # Sync hidden layer connections
+        for (src, dst, conn_type_str), weight in ariel_weights.items():
+            if src in hidden_idx and dst in hidden_idx:
+                src_i = hidden_idx[src]
+                dst_i = hidden_idx[dst]
+                
+                if 'ChemEx' in conn_type_str or 'ChemEx' == conn_type_str:
+                    if hasattr(twc, 'hid_EX') and twc.hid_EX.w_mask[src_i, dst_i] > 0:
+                        if weight > 0:
+                            w_inv = math.log(math.exp(weight) - 1.0) if weight < 20 else weight
+                            twc.hid_EX.w[src_i, dst_i] = w_inv
+                elif 'ChemIn' in conn_type_str or 'ChemIn' == conn_type_str:
+                    if hasattr(twc, 'hid_IN') and twc.hid_IN.w_mask[src_i, dst_i] > 0:
+                        if weight > 0:
+                            w_inv = math.log(math.exp(weight) - 1.0) if weight < 20 else weight
+                            twc.hid_IN.w[src_i, dst_i] = w_inv
+        
+        # Sync hid2out connections
+        for (src, dst, conn_type_str), weight in ariel_weights.items():
+            if src in hidden_idx and dst in output_idx:
+                src_i = hidden_idx[src]
+                dst_i = output_idx[dst]
+                
+                if 'ChemEx' in conn_type_str or 'ChemEx' == conn_type_str:
+                    if hasattr(twc, 'hid2out') and twc.hid2out.w_mask[src_i, dst_i] > 0:
+                        if weight > 0:
+                            w_inv = math.log(math.exp(weight) - 1.0) if weight < 20 else weight
+                            twc.hid2out.w[src_i, dst_i] = w_inv
+        
+        # Sync gap junction connections
+        # GJ edges are: PLM->PVC (input[1] -> hidden[2]), AVM->AVD (input[2] -> hidden[1])
+        # Based on twc_builder.py: gj_edges = [[1, 2], [2, 1]] where first row is src, second is dst
+        if hasattr(twc, 'in2hid_GJ'):
+            gj_src = twc.in2hid_GJ.gj_idx[0]  # (E,) tensor of source indices
+            gj_dst = twc.in2hid_GJ.gj_idx[1]  # (E,) tensor of destination indices
+            for (src, dst, conn_type_str), weight in ariel_weights.items():
+                if 'GJ' in conn_type_str or 'AGJ' in conn_type_str or 'SGJ' in conn_type_str:
+                    if src in input_idx and dst in hidden_idx:
+                        src_i = input_idx[src]
+                        dst_i = hidden_idx[dst]
+                        # Find matching edge
+                        for edge_idx in range(gj_src.shape[0]):
+                            if gj_src[edge_idx].item() == src_i and gj_dst[edge_idx].item() == dst_i:
+                                # Compute softplus inverse: if softplus(x) = w, then x = log(exp(w) - 1)
+                                if weight > 0:
+                                    w_inv = math.log(math.exp(weight) - 1.0) if weight < 20 else weight
+                                    twc.in2hid_GJ.gj_w[edge_idx] = w_inv
+                                break
+
+def sync_neuron_params_from_ariel_to_torch(fiu_model, twc, neuron_names_by_layer):
+    """Synchronize neuron thresholds and decay factors."""
+    ariel_states = extract_ariel_neuron_states(fiu_model)
+    
+    with torch.no_grad():
+        # Sync input layer
+        for idx, name in enumerate(neuron_names_by_layer['input']):
+            if name in ariel_states:
+                twc.in_layer.threshold[idx] = ariel_states[name]['threshold']
+                twc.in_layer.decay[idx] = ariel_states[name]['decay']
+        
+        # Sync hidden layer
+        for idx, name in enumerate(neuron_names_by_layer['hidden']):
+            if name in ariel_states:
+                twc.hid_layer.threshold[idx] = ariel_states[name]['threshold']
+                twc.hid_layer.decay[idx] = ariel_states[name]['decay']
+        
+        # Sync output layer
+        for idx, name in enumerate(neuron_names_by_layer['output']):
+            if name in ariel_states:
+                twc.out_layer.threshold[idx] = ariel_states[name]['threshold']
+                twc.out_layer.decay[idx] = ariel_states[name]['decay']
+
+def get_neuron_names_from_json():
+    """Get neuron names organized by layer from TWC JSON."""
+    json_path = Path(__file__).parent.parent / "src" / "twc" / "TWC_fiu.json"
+    with open(json_path, "r") as f:
+        net_data = json.load(f)
+    return net_data["groups"]
+
+def convert_ariel_output_to_action(fiu_output):
+    """Convert ariel model output (scalar) to match action decoder format."""
+    # The ariel model returns a scalar from OUT1 interface
+    # This is already the action value, but we need to ensure it's in the right format
+    return fiu_output
+
+def compare_states(ariel_states, torch_states, tolerance=1e-5):
+    """Compare neuron states between implementations."""
+    differences = {}
+    all_match = True
+    
+    for name in set(ariel_states.keys()) | set(torch_states.keys()):
+        if name not in ariel_states:
+            differences[name] = {'error': 'Missing in ariel'}
+            all_match = False
+            continue
+        if name not in torch_states:
+            differences[name] = {'error': 'Missing in torch'}
+            all_match = False
+            continue
+        
+        a_state = ariel_states[name]
+        t_state = torch_states[name]
+        
+        diff = {}
+        for key in ['internal', 'output', 'threshold', 'decay']:
+            if key in a_state and key in t_state:
+                a_val = a_state[key]
+                t_val = t_state[key]
+                error = abs(a_val - t_val)
+                diff[key] = {
+                    'ariel': a_val,
+                    'torch': t_val,
+                    'error': error,
+                    'match': error < tolerance
+                }
+                if error >= tolerance:
+                    all_match = False
+        
+        if diff:
+            differences[name] = diff
+    
+    return differences, all_match
 
 def main():
     env = gym.make(ENV)
@@ -23,76 +248,197 @@ def main():
     out_dir = os.path.join('out/tests/twc_validation')
     os.makedirs(out_dir, exist_ok=True)
 
+    # Get neuron name mappings
+    neuron_names = get_neuron_names_from_json()
+    
     # Build TWC for MCC with logging enabled
     twc = build_twc(
         obs_encoder=mcc_obs_encoder,
         action_decoder=twc_out_2_mcc_action,
-        internal_steps=1,
+        internal_steps=1,  # Match ariel's single step
         log_stats=True,
     )
-    twc._set_all_weights_to_one()
     twc.eval()
 
+    # Load ariel model
     xml_path = os.path.join(Path(__file__).parent, 'TWFiuriBaseFIU.xml')
     fiu_twc = FiuModel('FIU')
     fiu_twc.loadFromFile(xml_path)
     fiu_twc.Reset()
-
-    print(twc.state_dict())
-    print(fiu_twc)
-
-    with open(SRC_ROOT / "twc" / "TWC_fiu.json", "r", encoding="utf-8") as spec_file:
-        groups_spec = json.load(spec_file)["groups"]
-    group_order = ("input", "hidden", "output")
-    neuron_groups = {layer: groups_spec[layer] for layer in group_order}
-    fiu_layer_traces = {
-        layer: {"in": [], "out": []}
-        for layer in group_order
-    }
-
-    # Generate a short synthetic observation sequence (position, velocity)
-    # Cover both sides of valley and velocities in [-VEL_MAX, VEL_MAX]
-    T = 10
-    a_actions = []
-    t_actions = []
-    with torch.no_grad():
-        for t in range(T):
-            obs = env.observation_space.sample()
-            obs_t = torch.as_tensor(obs).unsqueeze(0)
-            a = twc(obs_t)  # logs internal states each call
-            t_actions.append(a.squeeze().item())
-            a = fiu_twc.Update([obs[0], obs[1]])
-            a_actions.append(a)
-            for layer_name in group_order:
-                layer_neurons = neuron_groups[layer_name]
-                in_vals = []
-                out_vals = []
-                for neuron_name in layer_neurons:
-                    neuron = fiu_twc.neuralnetwork.getNeuron(neuron_name)
-                    in_vals.append(neuron.getInternalState())
-                    out_vals.append(neuron.getOutputState())
-                fiu_layer_traces[layer_name]["in"].append(torch.tensor(in_vals, dtype=torch.float32))
-                fiu_layer_traces[layer_name]["out"].append(torch.tensor(out_vals, dtype=torch.float32))
-
-    # Extract monitor logs into (T, N) tensors per layer
-    monitor = twc.monitor
-    layers = ['in', 'hid', 'out']
-    series = {}
-    for L in layers:
-        in_states = torch.stack([step['in_state'][0] for step in monitor[L]], dim=0)  # (T, N)
-        out_states = torch.stack([step['out_state'][0] for step in monitor[L]], dim=0)  # (T, N)
-        series[L] = (in_states, out_states)
-
-    # Collect equivalent traces for the author's implementation grouped per anatomical layer
-    fiu_series = {}
-    for layer_name in group_order:
-        layer_in = torch.stack(fiu_layer_traces[layer_name]["in"], dim=0)
-        layer_out = torch.stack(fiu_layer_traces[layer_name]["out"], dim=0)
-        fiu_series[layer_name] = (layer_in, layer_out)
-
-    print(a_actions)
-    print(t_actions)
-
+    
+    # Synchronize weights and parameters
+    print("Synchronizing weights and parameters...")
+    sync_weights_from_ariel_to_torch(fiu_twc, twc, neuron_names)
+    sync_neuron_params_from_ariel_to_torch(fiu_twc, twc, neuron_names)
+    
+    # Reset both models
+    #fiu_twc.Reset()
+    #twc.reset()
+    
+    # Generate test observations
+    num_tests = 1000
+    test_observations = []
+    env.reset()
+    for i in range(num_tests):
+        obs = env.observation_space.sample()
+        test_observations.append(obs)
+    
+    # Storage for comparisons
+    output_differences = []
+    state_differences_all = []
+    ariel_outputs = []
+    torch_outputs = []
+    
+    print(f"\nRunning {num_tests} test cases...")
+    print("=" * 80)
+    
+    for test_idx, obs in enumerate(test_observations):
+        print(f"\nTest {test_idx + 1}/{num_tests}: obs={obs}")
+        
+        # Run ariel model
+        fiu_twc.Reset()  # Reset state before each test
+        ariel_output = fiu_twc.Update(obs, mode=None, doLog=False)
+        ariel_states = extract_ariel_neuron_states(fiu_twc)
+        ariel_outputs.append(ariel_output)
+        
+        # Run torch model
+        twc.reset_internal_only()  # Reset  internal state before each test
+        obs_tensor = torch.tensor([obs], dtype=torch.float32)
+        with torch.no_grad():
+            torch_output = twc(obs_tensor)
+        torch_states = extract_torch_neuron_states(twc, neuron_names)
+        torch_outputs.append(torch_output.squeeze().item())
+        
+        # Compare outputs
+        output_diff = abs(ariel_output - torch_outputs[-1])
+        output_differences.append(output_diff)
+        print(f"  Output: ariel={ariel_output:.6f}, torch={torch_outputs[-1]:.6f}, diff={output_diff:.6f}")
+        
+        # Compare states
+        state_diffs, states_match = compare_states(ariel_states, torch_states, tolerance=1e-4)
+        state_differences_all.append(state_diffs)
+        
+        if not states_match:
+            print(f"  ⚠ State differences detected:")
+            for name, diffs in state_diffs.items():
+                if 'error' in diffs:
+                    print(f"    {name}: {diffs['error']}")
+                else:
+                    for key, val in diffs.items():
+                        if not val['match']:
+                            print(f"    {name}.{key}: ariel={val['ariel']:.6f}, torch={val['torch']:.6f}, error={val['error']:.6f}")
+    
+    # Summary statistics
+    print("\n" + "=" * 80)
+    print("SUMMARY")
+    print("=" * 80)
+    output_diffs_array = np.array(output_differences)
+    print(f"Output differences:")
+    print(f"  Mean: {output_diffs_array.mean():.6f}")
+    print(f"  Std:  {output_diffs_array.std():.6f}")
+    print(f"  Max:  {output_diffs_array.max():.6f}")
+    print(f"  Min:  {output_diffs_array.min():.6f}")
+    
+    # Count state mismatches
+    total_state_checks = 0
+    state_mismatches = 0
+    for state_diffs in state_differences_all:
+        for name, diffs in state_diffs.items():
+            if 'error' not in diffs:
+                for key, val in diffs.items():
+                    total_state_checks += 1
+                    if not val['match']:
+                        state_mismatches += 1
+    
+    if total_state_checks > 0:
+        match_rate = (1 - state_mismatches / total_state_checks) * 100
+        print(f"\nState comparison:")
+        print(f"  Total checks: {total_state_checks}")
+        print(f"  Mismatches: {state_mismatches}")
+        print(f"  Match rate: {match_rate:.2f}%")
+    
+    # Create visualizations
+    fig, axes = plt.subplots(2, 2, figsize=(14, 10))
+    
+    # Output comparison
+    ax = axes[0, 0]
+    ax.scatter(ariel_outputs, torch_outputs, alpha=0.6)
+    ax.plot([min(ariel_outputs + torch_outputs), max(ariel_outputs + torch_outputs)],
+            [min(ariel_outputs + torch_outputs), max(ariel_outputs + torch_outputs)],
+            'r--', label='y=x')
+    ax.set_xlabel('Ariel Output')
+    ax.set_ylabel('Torch Output')
+    ax.set_title('Output Comparison')
+    ax.legend()
+    ax.grid(True)
+    
+    # Output differences
+    ax = axes[0, 1]
+    ax.plot(output_differences, 'o-')
+    ax.set_xlabel('Test Case')
+    ax.set_ylabel('Absolute Difference')
+    ax.set_title('Output Differences Over Tests')
+    ax.grid(True)
+    
+    # Output distribution
+    ax = axes[1, 0]
+    ax.hist(ariel_outputs, alpha=0.5, label='Ariel', bins=15)
+    ax.hist(torch_outputs, alpha=0.5, label='Torch', bins=15)
+    ax.set_xlabel('Output Value')
+    ax.set_ylabel('Frequency')
+    ax.set_title('Output Distribution')
+    ax.legend()
+    ax.grid(True)
+    
+    # Error distribution
+    ax = axes[1, 1]
+    ax.hist(output_differences, bins=15, edgecolor='black')
+    ax.set_xlabel('Absolute Error')
+    ax.set_ylabel('Frequency')
+    ax.set_title('Error Distribution')
+    ax.grid(True)
+    
+    plt.tight_layout()
+    plt.savefig(os.path.join(out_dir, 'twc_comparison.png'), dpi=150)
+    print(f"\nVisualization saved to {os.path.join(out_dir, 'twc_comparison.png')}")
+    
+    # Save detailed comparison to file
+    with open(os.path.join(out_dir, 'detailed_comparison.txt'), 'w') as f:
+        f.write("TWC Implementation Comparison\n")
+        f.write("=" * 80 + "\n\n")
+        f.write(f"Number of test cases: {num_tests}\n\n")
+        f.write("Output Statistics:\n")
+        f.write(f"  Mean difference: {output_diffs_array.mean():.6f}\n")
+        f.write(f"  Std difference:  {output_diffs_array.std():.6f}\n")
+        f.write(f"  Max difference:  {output_diffs_array.max():.6f}\n")
+        f.write(f"  Min difference:  {output_diffs_array.min():.6f}\n\n")
+        
+        if total_state_checks > 0:
+            f.write(f"State Comparison:\n")
+            f.write(f"  Total checks: {total_state_checks}\n")
+            f.write(f"  Mismatches: {state_mismatches}\n")
+            f.write(f"  Match rate: {match_rate:.2f}%\n\n")
+        
+        f.write("\nPer-test details:\n")
+        f.write("-" * 80 + "\n")
+        for test_idx, (obs, a_out, t_out, state_diffs) in enumerate(zip(
+            test_observations, ariel_outputs, torch_outputs, state_differences_all)):
+            f.write(f"\nTest {test_idx + 1}:\n")
+            f.write(f"  Observation: {obs}\n")
+            f.write(f"  Ariel output: {a_out:.6f}\n")
+            f.write(f"  Torch output: {t_out:.6f}\n")
+            f.write(f"  Difference: {abs(a_out - t_out):.6f}\n")
+            if state_diffs:
+                f.write(f"  State differences:\n")
+                for name, diffs in state_diffs.items():
+                    if 'error' in diffs:
+                        f.write(f"    {name}: {diffs['error']}\n")
+                    else:
+                        for key, val in diffs.items():
+                            if not val['match']:
+                                f.write(f"    {name}.{key}: error={val['error']:.6f}\n")
+    
+    print(f"Detailed comparison saved to {os.path.join(out_dir, 'detailed_comparison.txt')}")
 
 if __name__ == "__main__":
     main()

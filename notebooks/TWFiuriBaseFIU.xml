@@ -1,0 +1,47 @@
+<?xml version="1.0" ?>
+<Model name="COPY">
+   <NeuralNetwork name="TWC_Fiuri">
+      <neuron name="PVD" th="0.0" df="1" internalstate="0.0" outputstate="0.0"/>
+      <neuron name="ALM" th="0.0" df="1" internalstate="0.0" outputstate="0.0"/>
+      <neuron name="PLM" th="0.0" df="1" internalstate="0.0" outputstate="0.0"/>
+      <neuron name="AVM" th="0.0" df="1" internalstate="0.0" outputstate="0.0"/>
+      <neuron name="AVA" th="0.0" df="1" internalstate="0.0" outputstate="0.0"/>
+      <neuron name="AVD" th="0.0" df="1" internalstate="0.0" outputstate="0.0"/>
+      <neuron name="PVC" th="0.0" df="1" internalstate="0.0" outputstate="0.0"/>
+      <neuron name="AVB" th="0.0" df="1" internalstate="0.0" outputstate="0.0"/>
+      <neuron name="DVA" th="0.0" df="1" internalstate="0.0" outputstate="0.0"/>
+      <neuron name="FWD" th="0.0" df="1" internalstate="0.0" outputstate="0.0"/>
+      <neuron name="REV" th="0.0" df="1" internalstate="0.0" outputstate="0.0"/>
+      <connection connType="ConnectionType.ChemIn" connSource="PVD" connTarget="AVA" connWeight="1" testWeight="1" />
+      <connection connType="ConnectionType.ChemIn" connSource="PLM" connTarget="AVA" connWeight="1"  testWeight="1" />
+      <connection connType="ConnectionType.ChemEx" connSource="PVC" connTarget="AVA" connWeight="1"  testWeight="1" />
+      <connection connType="ConnectionType.ChemIn" connSource="AVB" connTarget="AVA" connWeight="1"  testWeight="1" />
+      <connection connType="ConnectionType.ChemEx" connSource="AVD" connTarget="AVA" connWeight="1"  testWeight="1" />
+      <connection connType="ConnectionType.ChemIn" connSource="PLM" connTarget="AVD" connWeight="1"  testWeight="1" />
+      <connection connType="ConnectionType.ChemEx" connSource="PVC" connTarget="AVD" connWeight="1"  testWeight="1" />
+      <connection connType="ConnectionType.ChemIn" connSource="AVA" connTarget="AVD" connWeight="1"  testWeight="1" />
+      <connection connType="ConnectionType.ChemIn" connSource="AVB" connTarget="AVD" connWeight="1"  testWeight="1" />
+      <connection connType="ConnectionType.AGJ" connSource="AVM" connTarget="AVD" connWeight="1"  testWeight="1" />
+      <connection connType="ConnectionType.ChemIn" connSource="ALM" connTarget="AVD" connWeight="1"  testWeight="1" />
+      <connection connType="ConnectionType.ChemIn" connSource="PVD" connTarget="PVC" connWeight="1"  testWeight="1" />
+      <connection connType="ConnectionType.AGJ" connSource="PLM" connTarget="PVC" connWeight="1"  testWeight="1" />
+      <connection connType="ConnectionType.ChemIn" connSource="AVA" connTarget="PVC" connWeight="1"  testWeight="1" />
+      <connection connType="ConnectionType.ChemEx" connSource="AVD" connTarget="PVC" connWeight="1"  testWeight="1" />
+      <connection connType="ConnectionType.ChemIn" connSource="AVM" connTarget="PVC" connWeight="1"  testWeight="1" />
+      <connection connType="ConnectionType.ChemIn" connSource="ALM" connTarget="PVC" connWeight="1"  testWeight="1" />
+      <connection connType="ConnectionType.ChemIn" connSource="DVA" connTarget="PVC" connWeight="1"  testWeight="1" />
+      <connection connType="ConnectionType.ChemEx" connSource="PVC" connTarget="AVB" connWeight="1"  testWeight="1" />
+      <connection connType="ConnectionType.ChemIn" connSource="AVA" connTarget="AVB" connWeight="1"  testWeight="1" />
+      <connection connType="ConnectionType.ChemEx" connSource="AVD" connTarget="AVB" connWeight="1"  testWeight="1" />
+      <connection connType="ConnectionType.ChemIn" connSource="PVD" connTarget="DVA" connWeight="1"  testWeight="1" />
+      <connection connType="ConnectionType.ChemIn" connSource="PLM" connTarget="DVA" connWeight="1"  testWeight="1" />
+      <connection connType="ConnectionType.ChemEx" connSource="PVC" connTarget="DVA" connWeight="1"  testWeight="1" />
+      <connection connType="ConnectionType.ChemEx" connSource="AVB" connTarget="FWD" connWeight="1"  testWeight="1"/>
+      <connection connType="ConnectionType.ChemEx" connSource="AVA" connTarget="REV" connWeight="1"  testWeight="1" />
+   </NeuralNetwork>
+   <Interfaces>
+      <interface name="IN1" valleyVal="-0.3" value="0.4449278400660712" minVal="-1.2" maxVal="0.6" positiveNeuron="PLM" negativeNeuron="AVM" type="IN" minState="-10.0" maxState="10.0"/>
+      <interface name="IN2" valleyVal="0.0" value="0.00798825453622447" minVal="-0.1" maxVal="0.1" positiveNeuron="ALM" negativeNeuron="PVD" type="IN" minState="-10.0" maxState="10.0"/>
+      <interface name="OUT1" valleyVal="0.0" value="0" minVal="-1.0" maxVal="1.0" positiveNeuron="FWD" negativeNeuron="REV" type="OUT" minState="-10.0" maxState="10.0"/>
+   </Interfaces>
+</Model>

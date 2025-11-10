@@ -8,9 +8,7 @@ from .twc_io import (
     POS_MIN,
     VEL_MAX,
     mcc_obs_encoder,
-    mcc_obs_encoder_speed_weighted,
     twc_out_2_mcc_action,
-    twc_out_2_mcc_action_tanh,
 )
 
 __all__ = [

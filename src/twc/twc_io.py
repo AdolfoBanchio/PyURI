@@ -6,59 +6,55 @@ import torch.nn.functional as F
 POS_MIN, POS_MAX = -1.2, 0.6
 VEL_MAX = 0.07   # symmetric
 # Min Max states of neurons
-MIN_STATE, MAX_STATE = -10,10
+MIN_STATE, MAX_STATE = -10, 10
 
+# Interface parameters matching TWFiuriBaseFIU.xml
+# IN1: Position interface
 POS_VALLEY_VAL = -0.3
+POS_MIN_VAL = -1.2
+POS_MAX_VAL = 0.6
+
+# IN2: Velocity interface  
 VEL_VALLEY_VAL = 0.0
+VEL_MIN_VAL = -0.1
+VEL_MAX_VAL = 0.1
+
+# OUT1: Action interface
+OUT_VALLEY_VAL = 0.0
+OUT_MIN_VAL = -1.0
+OUT_MAX_VAL = 1.0
+
+# For alternative encoders (smooth gates)
 SMOOTH_GATE_SHARPNESS = 8.0
+
+def bounded_affine(xmin: float, ymin: float, xmax: float, ymax: float, x: torch.Tensor) -> torch.Tensor:
+    """
+    Affine map [xmin, xmax] -> [ymin, ymax] with clamping.
+    Matches ariel's BinaryInterface.bounded_affine() exactly.
+    """
+    a = (ymax - ymin) / (xmax - xmin)
+    d = ymin - a * xmin
+    y = a * x + d
+    y = torch.clamp(y, min=ymin, max=ymax)
+    return y
 
 def mcc_obs_encoder(obs: torch.Tensor, n_inputs=4, device=None):
     """
-    obs: (B, 2) -> [position, velocity]
-
-    """
-    if device is None:
-        device = obs.device
-    pos = obs[:, 0].to(device)
-    vel = obs[:, 1].to(device)
-
-    min_fill = torch.full_like(pos, MIN_STATE, device=device)
-
-    pos_mask = pos >= POS_VALLEY_VAL
-    cor_pos = torch.where(pos_mask, pos / POS_MAX, pos / POS_MIN)
-    pos_pot = (MAX_STATE - MIN_STATE) * cor_pos + MIN_STATE
-
-    #PLM_EX_input = torch.where(pos_mask, pos_pot, min_fill)
-    #AVM_IN_input = torch.where(pos_mask, min_fill, pos_pot)
-    pos_gate = torch.sigmoid((pos - POS_VALLEY_VAL) * SMOOTH_GATE_SHARPNESS)
-    PLM_EX_input = pos_gate * pos_pot + (1 - pos_gate) * min_fill
-    AVM_IN_input = (1 - pos_gate) * pos_pot + pos_gate * min_fill
-
-    vel_mask = vel >= VEL_VALLEY_VAL
-    cor_vel = torch.where(vel_mask, vel / VEL_MAX, vel / -VEL_MAX)
-    vel_pot = (MAX_STATE - MIN_STATE) * cor_vel + MIN_STATE
+    Encodes observations to input neuron states, exactly matching ariel's BinaryInterface.feedNN().
     
-    #ALM_EX_input = torch.where(vel_mask, vel_pot, min_fill)
-    #PVD_IN_input = torch.where(vel_mask, min_fill, vel_pot)
-    vel_gate = torch.sigmoid((vel - VEL_VALLEY_VAL) * SMOOTH_GATE_SHARPNESS)
-    ALM_EX_input = vel_gate * vel_pot + (1 - vel_gate) * min_fill
-    PVD_IN_input = (1 - vel_gate) * vel_pot + vel_gate * min_fill
+    This matches the behavior of:
+    - IN1 interface: position -> PLM (positive) / AVM (negative)
+    - IN2 interface: velocity -> ALM (positive) / PVD (negative)
     
-    zero = torch.zeros_like(pos, device=device)
-
-    ex_in = torch.stack([zero ,PLM_EX_input, zero, ALM_EX_input], dim=1)
-    in_in = torch.stack([PVD_IN_input, zero, AVM_IN_input, zero], dim=1)
-
-    return ex_in.to(device), in_in.to(device)
-
-def mcc_obs_encoder_speed_weighted(obs: torch.Tensor, n_inputs=4, device=None, beta: float = 6.0):
-    """
-    Position/velocity encoder where the relative weight between position and
-    velocity drive depends on speed magnitude. When |vel| is small, position
-    drive dominates; as |vel| grows, velocity drive dominates.
-
-    obs: (B, 2) -> [position, velocity]
-    returns: (ex_in, in_in), each (B, 4)
+    Args:
+        obs: (B, 2) tensor with [position, velocity]
+        n_inputs: number of input neurons (4)
+        device: target device
+        
+    Returns:
+        (ex_in, in_in): tuple of (B, 4) tensors
+        - ex_in: excitatory channel [PVD=0, PLM, AVM=0, ALM]
+        - in_in: inhibitory channel [PVD, PLM=0, AVM, ALM=0]
     """
     if device is None:
         device = obs.device
@@ -66,79 +62,50 @@ def mcc_obs_encoder_speed_weighted(obs: torch.Tensor, n_inputs=4, device=None, b
     vel = obs[:, 1].to(device)
 
     min_fill = torch.full_like(pos, MIN_STATE, device=device)
+    zero = torch.zeros_like(pos, device=device)
 
-    # Position mapping with valley correction
+    # IN1: Position encoding (matches ariel's IN1 interface)
+    # If pos >= valleyVal (-0.3): PLM gets posPot, AVM gets minState
+    # If pos < valleyVal: PLM gets minState, AVM gets negPot
     pos_mask = pos >= POS_VALLEY_VAL
-    cor_pos = torch.where(pos_mask, pos / POS_MAX, pos / POS_MIN)
-    pos_pot = (MAX_STATE - MIN_STATE) * cor_pos + MIN_STATE
+    
+    # Compute corrected position value
+    # For pos >= valleyVal: corVal = pos / maxValue, posPot = (maxState-minState)*corVal + minState
+    # For pos < valleyVal: corVal = pos / (-minValue), negPot = (maxState-minState)*(-corVal) + minState
+    cor_pos = torch.where(pos_mask, pos / POS_MAX_VAL, pos / (-POS_MIN_VAL))
+    # Apply negation for negative branch (matching ariel's -corVal)
+    pos_pot = torch.where(
+        pos_mask,
+        (MAX_STATE - MIN_STATE) * cor_pos + MIN_STATE,  # pos >= valleyVal: no negation
+        (MAX_STATE - MIN_STATE) * (-cor_pos) + MIN_STATE  # pos < valleyVal: negate corVal
+    )
+    
+    # Hard threshold (matching ariel's if/else, not sigmoid)
+    PLM_EX_input = torch.where(pos_mask, pos_pot, min_fill)
+    AVM_IN_input = torch.where(pos_mask, min_fill, pos_pot)
 
-    # Velocity mapping with symmetric range
+    # IN2: Velocity encoding (matches ariel's IN2 interface)
+    # If vel >= valleyVal (0.0): ALM gets velPot, PVD gets minState
+    # If vel < valleyVal: ALM gets minState, PVD gets negPot
     vel_mask = vel >= VEL_VALLEY_VAL
-    cor_vel = torch.where(vel_mask, vel / VEL_MAX, vel / -VEL_MAX)
-    vel_pot = (MAX_STATE - MIN_STATE) * cor_vel + MIN_STATE
+    
+    # Compute corrected velocity value
+    # For vel >= valleyVal: corVal = vel / maxValue, velPot = (maxState-minState)*corVal + minState
+    # For vel < valleyVal: corVal = vel / (-minValue), negPot = (maxState-minState)*(-corVal) + minState
+    cor_vel = torch.where(vel_mask, vel / VEL_MAX_VAL, vel / (-VEL_MIN_VAL))
+    # Apply negation for negative branch (matching ariel's -corVal)
+    vel_pot = torch.where(
+        vel_mask,
+        (MAX_STATE - MIN_STATE) * cor_vel + MIN_STATE,  # vel >= valleyVal: no negation
+        (MAX_STATE - MIN_STATE) * (-cor_vel) + MIN_STATE  # vel < valleyVal: negate corVal
+    )
+    
+    # Hard threshold (matching ariel's if/else, not sigmoid)
+    ALM_EX_input = torch.where(vel_mask, vel_pot, min_fill)
+    PVD_IN_input = torch.where(vel_mask, min_fill, vel_pot)
 
-    # Speed-based weighting in [0,1]
-    speed = torch.clamp(torch.abs(vel) / VEL_MAX, 0.0, 1.0)
-    w_pos = torch.sigmoid(beta * (1.0 - speed))  # high when slow
-    w_vel = 1.0 - w_pos
-
-    # Smooth gates around valley values
-    pos_gate = torch.sigmoid((pos - POS_VALLEY_VAL) * SMOOTH_GATE_SHARPNESS)
-    vel_gate = torch.sigmoid((vel - VEL_VALLEY_VAL) * SMOOTH_GATE_SHARPNESS)
-
-    # Apply weights to modulate away from MIN_STATE baseline
-    pos_mod = MIN_STATE + w_pos * (pos_pot - MIN_STATE)
-    vel_mod = MIN_STATE + w_vel * (vel_pot - MIN_STATE)
-
-    PLM_EX_input = pos_gate * pos_mod + (1 - pos_gate) * min_fill
-    AVM_IN_input = (1 - pos_gate) * pos_mod + pos_gate * min_fill
-
-    ALM_EX_input = vel_gate * vel_mod + (1 - vel_gate) * min_fill
-    PVD_IN_input = (1 - vel_gate) * vel_mod + vel_gate * min_fill
-
-    zero = torch.zeros_like(pos, device=device)
-    ex_in = torch.stack([zero, PLM_EX_input, zero, ALM_EX_input], dim=1)
-    in_in = torch.stack([PVD_IN_input, zero, AVM_IN_input, zero], dim=1)
-
-    return ex_in.to(device), in_in.to(device)
-
-def mcc_obs_encoder_energy(obs: torch.Tensor, n_inputs=4, device=None, alpha: float = 0.6):
-    """
-    Energy-based encoder using a blended potential + kinetic heuristic:
-      - Potential ~ (sin(3*pos) + 1)/2  in [0,1]
-      - Kinetic  ~ (vel/VEL_MAX)^2      in [0,~1]
-      - Energy   = alpha*pot + (1-alpha)*kin, then mapped to [MIN_STATE, MAX_STATE]
-    Direction is taken from the sign (with smooth gates around valley values).
-
-    obs: (B, 2) -> [position, velocity]
-    returns: (ex_in, in_in), each (B, 4)
-    """
-    if device is None:
-        device = obs.device
-    pos = obs[:, 0].to(device)
-    vel = obs[:, 1].to(device)
-
-    min_fill = torch.full_like(pos, MIN_STATE, device=device)
-
-    # Heuristic energy terms
-    height = torch.sin(3.0 * pos)
-    pot = (height + 1.0) * 0.5  # [0,1]
-    kin = (vel / VEL_MAX) ** 2  # >=0
-    energy = torch.clamp(alpha * pot + (1.0 - alpha) * kin, 0.0, 1.0)
-
-    mag_pot = MIN_STATE + (MAX_STATE - MIN_STATE) * energy
-
-    # Smooth gates for direction around valley references
-    pos_gate = torch.sigmoid((pos - POS_VALLEY_VAL) * SMOOTH_GATE_SHARPNESS)
-    vel_gate = torch.sigmoid((vel - VEL_VALLEY_VAL) * SMOOTH_GATE_SHARPNESS)
-
-    PLM_EX_input = pos_gate * mag_pot + (1 - pos_gate) * min_fill
-    AVM_IN_input = (1 - pos_gate) * mag_pot + pos_gate * min_fill
-
-    ALM_EX_input = vel_gate * mag_pot + (1 - vel_gate) * min_fill
-    PVD_IN_input = (1 - vel_gate) * mag_pot + vel_gate * min_fill
-
-    zero = torch.zeros_like(pos, device=device)
+    # Stack into channels
+    # Input order: [PVD, PLM, AVM, ALM]
     ex_in = torch.stack([zero, PLM_EX_input, zero, ALM_EX_input], dim=1)
     in_in = torch.stack([PVD_IN_input, zero, AVM_IN_input, zero], dim=1)
 
@@ -146,28 +113,30 @@ def mcc_obs_encoder_energy(obs: torch.Tensor, n_inputs=4, device=None, alpha: fl
 
 def twc_out_2_mcc_action(y: torch.Tensor, fwd_idx: int = 1, rev_idx: int = 0, gain: float = 1.0):
     """
-    y: (B, 2) out-layer activations
-    Returns: (B, 1) torque in [-1, 1]
+    Decodes output neuron states to action, exactly matching ariel's BinaryInterface.getFeedBackNN().
+    
+    This matches the behavior of OUT1 interface:
+    - FWD (positive neuron) and REV (negative neuron) -> scalar action
+    
+    Args:
+        y: (B, 2) tensor with output layer internal states [REV, FWD]
+        fwd_idx: index of FWD neuron (default 1)
+        rev_idx: index of REV neuron (default 0)
+        gain: optional gain multiplier
+        
+    Returns:
+        (B, 1) tensor with action in [-1, 1]
     """
-    neg_St = y[:, rev_idx]
-    pos_St = y[:, fwd_idx]
+    # Get internal states (matching ariel: uses getInternalState())
+    neg_St = y[:, rev_idx]  # REV internal state
+    pos_St = y[:, fwd_idx]   # FWD internal state
     
-    def bounded_affine(xmin, ymin, xmax, ymax, x):
-        # affine map [xmin,xmax] -> [ymin,ymax]
-        m = (ymax - ymin) / (xmax - xmin)
-        b = ymin - m * xmin
-        return m * x + b
+    # Map from [minState, maxState] to [0, maxValue] and [0, -minValue]
+    # Matching ariel's bounded_affine calls:
+    # retVal1 = bounded_affine(minState, 0, maxState, maxValue, posSt)
+    # retVal2 = bounded_affine(minState, 0, maxState, -minValue, negSt)
+    retval1 = bounded_affine(MIN_STATE, 0.0, MAX_STATE, OUT_MAX_VAL, pos_St)
+    retval2 = bounded_affine(MIN_STATE, 0.0, MAX_STATE, -OUT_MIN_VAL, neg_St)
     
-    retval1 = bounded_affine(MIN_STATE, 0, MAX_STATE, 1.0, pos_St)
-    retval2 = bounded_affine(MIN_STATE, 0, MAX_STATE, 1.0, neg_St)
-
+    # Return difference (matching ariel: retVal1 - retVal2)
     return (retval1 - retval2).unsqueeze(1) * gain
-
-
-def twc_out_2_mcc_action_tanh(y: torch.Tensor, fwd_idx: int = 1, rev_idx: int = 0, gain: float = 1.0) -> torch.Tensor:
-    """
-    y: (B, 2) out-layer activations.
-    Returns: (B, 1) torque in [-1, 1] with tanh saturation applied to the drive.
-    """
-    drive = gain * (y[:, fwd_idx] - y[:, rev_idx])
-    return torch.tanh(drive).unsqueeze(1)

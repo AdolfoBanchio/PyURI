@@ -111,7 +111,6 @@ class FIURIModule(nn.Module):
 
     def neuron_step(self, state):
         """
-        DEPRECATED
         Performs one step of the neuron dynamics.
         If S is None, uses S = in_state (i.e., as if input_current were zero).
         """
@@ -121,8 +120,8 @@ class FIURIModule(nn.Module):
         T = self.threshold    # differentiable parameters
         D = self.decay
         
-        eps = 1e-6
-        eqE = (S - E).abs() <= eps
+        # Match ariel's exact equality check: currState==self.internalstate
+        eqE = S == E
 
         gt = S > T
         mask = (~gt) & eqE
@@ -150,9 +149,8 @@ class FIURIModule(nn.Module):
         T = self.threshold    # differentiable parameters
         D = self.decay
         
-        eps = 1e-6
-        eqE = (S - E).abs() <= eps
-        eqE = S == E 
+        # Match ariel's exact equality check: currState==self.internalstate
+        eqE = S == E
 
         gt = S > T
         mask = (~gt) & eqE
