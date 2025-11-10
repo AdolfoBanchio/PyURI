@@ -102,8 +102,8 @@ class FIURIModule(nn.Module):
         Oj = o_pre[:, src]              # (B, E_gj)
         En = current_in_state[:, dst]   # (B, E_gj)
         
-        # --- OPTIMIZATION 2: Use torch.sign ---
         sgn = torch.sign(Oj - En)
+        #sgn = torch.where(Oj >= En, Oj.new_ones(Oj.shape), -Oj.new_ones(Oj.shape))
         contrib = Oj * w * sgn          # (B, E_gj)
 
         # --- OPTIMIZATION 1: Accumulate directly into the provided buffer ---

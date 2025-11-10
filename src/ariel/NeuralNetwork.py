@@ -51,6 +51,7 @@ class NeuralNetwork:
     def resetAllNeurons(self):
         for n in self.neurons.values():
             n.setInternalState(0.0)
+            n.setOutputState(0.0)
 
     def countNeurons(self):
         return len(self.neurons)

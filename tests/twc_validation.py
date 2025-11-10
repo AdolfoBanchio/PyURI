@@ -11,7 +11,17 @@ import torch
 import numpy as np
 import gymnasium as gym
 from twc.twc_builder import build_twc
-from twc.twc_io import mcc_obs_encoder, twc_out_2_mcc_action, POS_MAX, POS_MIN, VEL_MAX, MIN_STATE, MAX_STATE
+from twc.twc_io import (
+    mcc_obs_encoder,
+    twc_out_2_mcc_action,
+    POS_MAX,
+    POS_MIN,
+    VEL_MAX,
+    MIN_STATE,
+    MAX_STATE,
+    POS_VALLEY_VAL,
+    VEL_VALLEY_VAL,
+)
 from ariel.Model import Model as FiuModel
 from ariel import Connection as con
 
@@ -166,6 +176,65 @@ def sync_weights_from_ariel_to_torch(fiu_model, twc, neuron_names_by_layer):
                                     twc.in2hid_GJ.gj_w[edge_idx] = w_inv
                                 break
 
+def sync_weights_from_torch_to_ariel(twc, fiu_model, neuron_names_by_layer):
+    """Synchronize weights from PyTorch TWC to ariel model (reverse direction)."""
+    # Build index maps
+    input_idx = {name: i for i, name in enumerate(neuron_names_by_layer['input'])}
+    hidden_idx = {name: i for i, name in enumerate(neuron_names_by_layer['hidden'])}
+    output_idx = {name: i for i, name in enumerate(neuron_names_by_layer['output'])}
+
+    # Convenience: softplus for positive weights
+    sp = torch.nn.functional.softplus
+
+    # Extract GJ index arrays if present
+    gj_src = twc.in2hid_GJ.gj_idx[0] if hasattr(twc, 'in2hid_GJ') else None
+    gj_dst = twc.in2hid_GJ.gj_idx[1] if hasattr(twc, 'in2hid_GJ') else None
+
+    # Iterate Ariel connections and set test weights from TWC effective weights
+    for conn in fiu_model.neuralnetwork.getConnections():
+        src = conn.getSource().getName()
+        dst = conn.getTarget().getName()
+        ctype = conn.connType
+
+        # ChemIn
+        if 'ChemIn' in str(ctype):
+            if src in input_idx and dst in hidden_idx and hasattr(twc, 'in2hid_IN'):
+                si, di = input_idx[src], hidden_idx[dst]
+                mask_val = twc.in2hid_IN.w_mask[si, di].item() if hasattr(twc.in2hid_IN, 'w_mask') else 1.0
+                val = sp(twc.in2hid_IN.w[si, di]).item() * mask_val
+                conn.setTestWeight(max(0.0, float(val)))
+            elif src in hidden_idx and dst in hidden_idx and hasattr(twc, 'hid_IN'):
+                si, di = hidden_idx[src], hidden_idx[dst]
+                mask_val = twc.hid_IN.w_mask[si, di].item() if hasattr(twc.hid_IN, 'w_mask') else 1.0
+                val = sp(twc.hid_IN.w[si, di]).item() * mask_val
+                conn.setTestWeight(max(0.0, float(val)))
+
+        # ChemEx
+        elif 'ChemEx' in str(ctype):
+            if src in hidden_idx and dst in hidden_idx and hasattr(twc, 'hid_EX'):
+                si, di = hidden_idx[src], hidden_idx[dst]
+                mask_val = twc.hid_EX.w_mask[si, di].item() if hasattr(twc.hid_EX, 'w_mask') else 1.0
+                val = sp(twc.hid_EX.w[si, di]).item() * mask_val
+                conn.setTestWeight(max(0.0, float(val)))
+            elif src in hidden_idx and dst in output_idx and hasattr(twc, 'hid2out'):
+                si, di = hidden_idx[src], output_idx[dst]
+                mask_val = twc.hid2out.w_mask[si, di].item() if hasattr(twc.hid2out, 'w_mask') else 1.0
+                val = sp(twc.hid2out.w[si, di]).item() * mask_val
+                conn.setTestWeight(max(0.0, float(val)))
+
+        # Gap junctions: AGJ / SGJ
+        else:
+            if gj_src is None or gj_dst is None:
+                continue
+            if src in input_idx and dst in hidden_idx:
+                si, di = input_idx[src], hidden_idx[dst]
+                # Find the matching edge index
+                for e in range(gj_src.shape[0]):
+                    if gj_src[e].item() == si and gj_dst[e].item() == di:
+                        val = sp(twc.in2hid_GJ.gj_w[e]).item()
+                        conn.setTestWeight(max(0.0, float(val)))
+                        break
+
 def sync_neuron_params_from_ariel_to_torch(fiu_model, twc, neuron_names_by_layer):
     """Synchronize neuron thresholds and decay factors."""
     ariel_states = extract_ariel_neuron_states(fiu_model)
@@ -188,6 +257,21 @@ def sync_neuron_params_from_ariel_to_torch(fiu_model, twc, neuron_names_by_layer
             if name in ariel_states:
                 twc.out_layer.threshold[idx] = ariel_states[name]['threshold']
                 twc.out_layer.decay[idx] = ariel_states[name]['decay']
+
+def sync_neuron_params_from_torch_to_ariel(twc, fiu_model, neuron_names_by_layer):
+    """Synchronize neuron thresholds and decay factors from TWC to Ariel."""
+    # Helper to set per layer
+    def set_layer_params(layer, names, set_th_fn, set_df_fn):
+        for idx, name in enumerate(names):
+            th = float(layer.threshold[idx].item())
+            df = float(layer.decay[idx].item())
+            set_th_fn(name, th)
+            set_df_fn(name, df)
+
+    nn = fiu_model.neuralnetwork
+    set_layer_params(twc.in_layer, neuron_names_by_layer['input'], nn.setNeuronTestThresholdOfName, nn.setNeuronTestDecayFactorOfName)
+    set_layer_params(twc.hid_layer, neuron_names_by_layer['hidden'], nn.setNeuronTestThresholdOfName, nn.setNeuronTestDecayFactorOfName)
+    set_layer_params(twc.out_layer, neuron_names_by_layer['output'], nn.setNeuronTestThresholdOfName, nn.setNeuronTestDecayFactorOfName)
 
 def get_neuron_names_from_json():
     """Get neuron names organized by layer from TWC JSON."""
@@ -244,6 +328,7 @@ def main():
     env = gym.make(ENV)
     env.reset(seed=SEED)
     env.action_space.seed(SEED)
+    torch.manual_seed(SEED)
 
     out_dir = os.path.join('out/tests/twc_validation')
     os.makedirs(out_dir, exist_ok=True)
@@ -266,10 +351,9 @@ def main():
     fiu_twc.loadFromFile(xml_path)
     fiu_twc.Reset()
     
-    # Synchronize weights and parameters
-    print("Synchronizing weights and parameters...")
-    sync_weights_from_ariel_to_torch(fiu_twc, twc, neuron_names)
-    sync_neuron_params_from_ariel_to_torch(fiu_twc, twc, neuron_names)
+    print("Synchronizing weights and parameters (Torch -> Ariel)...")
+    sync_weights_from_torch_to_ariel(twc, fiu_twc, neuron_names)
+    sync_neuron_params_from_torch_to_ariel(twc, fiu_twc, neuron_names)
     
     # Reset both models
     #fiu_twc.Reset()
@@ -288,24 +372,30 @@ def main():
     state_differences_all = []
     ariel_outputs = []
     torch_outputs = []
+
+    # Per-neuron mismatch tracking and error stats
+    # Structure: { neuron_name: { key: {"count": int, "errors": [float]} } }
+    per_neuron_stats = {}
     
     print(f"\nRunning {num_tests} test cases...")
     print("=" * 80)
     
     for test_idx, obs in enumerate(test_observations):
         print(f"\nTest {test_idx + 1}/{num_tests}: obs={obs}")
+
+        if test_idx % 10 == 0:
+            fiu_twc.Reset()  
+            twc.reset()
         
-        # Run ariel model
-        fiu_twc.Reset()  # Reset state before each test
         ariel_output = fiu_twc.Update(obs, mode=None, doLog=False)
         ariel_states = extract_ariel_neuron_states(fiu_twc)
         ariel_outputs.append(ariel_output)
         
         # Run torch model
-        twc.reset_internal_only()  # Reset  internal state before each test
         obs_tensor = torch.tensor([obs], dtype=torch.float32)
         with torch.no_grad():
             torch_output = twc(obs_tensor)
+        
         torch_states = extract_torch_neuron_states(twc, neuron_names)
         torch_outputs.append(torch_output.squeeze().item())
         
@@ -317,6 +407,22 @@ def main():
         # Compare states
         state_diffs, states_match = compare_states(ariel_states, torch_states, tolerance=1e-4)
         state_differences_all.append(state_diffs)
+
+        # Aggregate per-neuron mismatches and errors
+        for name, diffs in state_diffs.items():
+            if 'error' in diffs:
+                continue
+            if name not in per_neuron_stats:
+                per_neuron_stats[name] = {
+                    'internal': {"count": 0, "errors": []},
+                    'output':   {"count": 0, "errors": []},
+                    'threshold':{"count": 0, "errors": []},
+                    'decay':    {"count": 0, "errors": []},
+                }
+            for key, val in diffs.items():
+                if not val['match']:
+                    per_neuron_stats[name][key]["count"] += 1
+                    per_neuron_stats[name][key]["errors"].append(val['error'])
         
         if not states_match:
             print(f"  ⚠ State differences detected:")
@@ -356,6 +462,25 @@ def main():
         print(f"  Total checks: {total_state_checks}")
         print(f"  Mismatches: {state_mismatches}")
         print(f"  Match rate: {match_rate:.2f}%")
+
+    # Compute per-neuron aggregated statistics
+    def _agg_errs(errs):
+        if not errs:
+            return 0, 0.0, 0.0
+        arr = np.array(errs, dtype=np.float32)
+        return len(errs), float(arr.mean()), float(arr.max())
+
+    # Flatten a simple summary for console: top neurons by total mismatches
+    per_neuron_totals = []
+    for neuron, keys in per_neuron_stats.items():
+        total = sum(v["count"] for v in keys.values())
+        per_neuron_totals.append((neuron, total))
+    per_neuron_totals.sort(key=lambda x: x[1], reverse=True)
+
+    if per_neuron_totals:
+        print("\nTop per-neuron mismatches:")
+        for neuron, total in per_neuron_totals[:10]:
+            print(f"  {neuron}: {total}")
     
     # Create visualizations
     fig, axes = plt.subplots(2, 2, figsize=(14, 10))
@@ -418,6 +543,18 @@ def main():
             f.write(f"  Total checks: {total_state_checks}\n")
             f.write(f"  Mismatches: {state_mismatches}\n")
             f.write(f"  Match rate: {match_rate:.2f}%\n\n")
+
+        # Per-neuron mismatch summary
+        f.write("Per-neuron mismatch summary:\n")
+        f.write("-" * 80 + "\n")
+        # Order by total mismatches
+        for neuron, total in per_neuron_totals:
+            f.write(f"{neuron}: total_mismatches={total}\n")
+            for key in ("internal", "output", "threshold", "decay"):
+                cnt, mean_err, max_err = _agg_errs(per_neuron_stats.get(neuron, {}).get(key, {}).get("errors", []))
+                if cnt > 0:
+                    f.write(f"  - {key}: count={per_neuron_stats[neuron][key]['count']}, mean_err={mean_err:.6f}, max_err={max_err:.6f}\n")
+        f.write("\n")
         
         f.write("\nPer-test details:\n")
         f.write("-" * 80 + "\n")
@@ -440,5 +577,112 @@ def main():
     
     print(f"Detailed comparison saved to {os.path.join(out_dir, 'detailed_comparison.txt')}")
 
+     # =============================
+    # Stateful multi-step evaluation
+    # =============================
+    def align_states(fiu_model, twc_model, align_steps: int = 3):
+        neutral = np.array([POS_VALLEY_VAL, VEL_VALLEY_VAL], dtype=np.float32)
+        obs_tensor = torch.tensor([neutral], dtype=torch.float32)
+        for _ in range(align_steps):
+            # Run both without resets to drive to a common quiescent state
+            fiu_model.Update(neutral, mode=None, doLog=False)
+            with torch.no_grad():
+                twc_model(obs_tensor)
+    def gen_pulsed_sequence(seq_len: int, pulse_every: int = 5):
+        seq = []
+        for t in range(seq_len):
+            if t % pulse_every == 0:
+                # Strong activating sample: toggle around both interfaces
+                pos = np.random.choice([POS_MIN, POS_MAX])
+                vel = np.random.choice([-VEL_MAX, VEL_MAX])
+            else:
+                # Near valley to exercise both branches and avoid full quiescence
+                pos = float(POS_VALLEY_VAL + np.random.uniform(-0.1, 0.1))
+                vel = float(VEL_VALLEY_VAL + np.random.uniform(-0.03, 0.03))
+                pos = max(POS_MIN, min(POS_MAX, pos))
+                vel = max(-VEL_MAX, min(VEL_MAX, vel))
+            seq.append(np.array([pos, vel], dtype=np.float32))
+        return seq
+    def run_stateful_eval(num_sequences: int = 25, seq_len: int = 30, burn_in: int = 3, pulse_every: int = 5, eps: float = 1e-3):
+        active_diffs = []
+        all_diffs = []
+        per_neuron_stats_active = {}
+        for s in range(num_sequences):
+            # Reset models at the start of each sequence
+            fiu_twc.Reset()
+            twc.reset()
+            # Align to a common operating point
+            align_states(fiu_twc, twc, align_steps=burn_in)
+            seq = gen_pulsed_sequence(seq_len, pulse_every=pulse_every)
+            for obs in seq:
+                # Step without resets (stateful)
+                ar_out = fiu_twc.Update(obs, mode=None, doLog=False)
+                with torch.no_grad():
+                    t_out = twc(torch.tensor([obs], dtype=torch.float32)).squeeze().item()
+                diff = abs(ar_out - t_out)
+                all_diffs.append(diff)
+                # Active-only error tracking
+                if (abs(ar_out) > eps) or (abs(t_out) > eps):
+                    active_diffs.append(diff)
+                    # Per-neuron mismatch on active steps
+                    a_states = extract_ariel_neuron_states(fiu_twc)
+                    t_states = extract_torch_neuron_states(twc, neuron_names)
+                    state_diffs, _ = compare_states(a_states, t_states, tolerance=1e-4)
+                    for name, diffs in state_diffs.items():
+                        if 'error' in diffs:
+                            continue
+                        if name not in per_neuron_stats_active:
+                            per_neuron_stats_active[name] = {
+                                'internal': {"count": 0, "errors": []},
+                                'output':   {"count": 0, "errors": []},
+                                'threshold':{"count": 0, "errors": []},
+                                'decay':    {"count": 0, "errors": []},
+                            }
+                        for key, val in diffs.items():
+                            if not val['match']:
+                                per_neuron_stats_active[name][key]['count'] += 1
+                                per_neuron_stats_active[name][key]['errors'].append(val['error'])
+        all_diffs_arr = np.array(all_diffs, dtype=np.float32)
+        active_diffs_arr = np.array(active_diffs, dtype=np.float32) if active_diffs else np.array([], dtype=np.float32)
+        def _agg_errs(errs):
+            if not errs:
+                return 0, 0.0, 0.0
+            arr = np.array(errs, dtype=np.float32)
+            return len(errs), float(arr.mean()), float(arr.max())
+        per_neuron_totals_active = []
+        for neuron, keys in per_neuron_stats_active.items():
+            total = sum(v['count'] for v in keys.values())
+            per_neuron_totals_active.append((neuron, total))
+        per_neuron_totals_active.sort(key=lambda x: x[1], reverse=True)
+        # Save stateful summary
+        stateful_path = os.path.join(out_dir, 'stateful_summary.txt')
+        with open(stateful_path, 'w') as f:
+            f.write("TWC Stateful Evaluation (multi-step)\n")
+            f.write("=" * 80 + "\n\n")
+            f.write(f"Sequences: {num_sequences}, Length: {seq_len}, Burn-in: {burn_in}, Pulse-every: {pulse_every}\n")
+            f.write(f"Total steps: {num_sequences*seq_len}\n")
+            f.write(f"Active steps: {active_diffs_arr.size} (|action|>{eps})\n\n")
+            f.write("Action error (all steps):\n")
+            f.write(f"  Mean: {all_diffs_arr.mean() if all_diffs_arr.size else 0.0:.6f}\n")
+            f.write(f"  Std:  {all_diffs_arr.std()  if all_diffs_arr.size else 0.0:.6f}\n")
+            f.write(f"  Max:  {all_diffs_arr.max()  if all_diffs_arr.size else 0.0:.6f}\n")
+            f.write(f"  Min:  {all_diffs_arr.min()  if all_diffs_arr.size else 0.0:.6f}\n\n")
+            f.write("Action error (active-only):\n")
+            f.write(f"  Mean: {active_diffs_arr.mean() if active_diffs_arr.size else 0.0:.6f}\n")
+            f.write(f"  Std:  {active_diffs_arr.std()  if active_diffs_arr.size else 0.0:.6f}\n")
+            f.write(f"  Max:  {active_diffs_arr.max()  if active_diffs_arr.size else 0.0:.6f}\n")
+            f.write(f"  Min:  {active_diffs_arr.min()  if active_diffs_arr.size else 0.0:.6f}\n\n")
+            f.write("Per-neuron mismatch summary (active-only):\n")
+            f.write("-" * 80 + "\n")
+            for neuron, total in per_neuron_totals_active:
+                f.write(f"{neuron}: total_mismatches={total}\n")
+                for key in ("internal", "output", "threshold", "decay"):
+                    cnt, mean_err, max_err = _agg_errs(per_neuron_stats_active.get(neuron, {}).get(key, {}).get("errors", []))
+                    if cnt > 0:
+                        f.write(f"  - {key}: count={per_neuron_stats_active[neuron][key]['count']}, mean_err={mean_err:.6f}, max_err={max_err:.6f}\n")
+        print(f"Stateful summary saved to {stateful_path}")
+    # Run stateful evaluation to validate multi-step parity
+    run_stateful_eval(num_sequences=25, seq_len=30, burn_in=3, pulse_every=5, eps=1e-3)
+    
 if __name__ == "__main__":
     main()

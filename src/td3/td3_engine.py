@@ -115,6 +115,9 @@ class TD3Engine():
         mask = 1.0 - term
 
         # 1. compute the targets
+        # Ensure recurrent actors do not carry hidden state across random batches
+        if hasattr(self.actor_target, 'reset'):
+            self.actor_target.reset()
         with torch.no_grad():
             noise = (torch.randn_like(act) * self.target_policy_noise).clamp(-self.target_noise_clip,
                                                                              self.target_noise_clip)
@@ -140,6 +143,9 @@ class TD3Engine():
         actor_loss = None
         self.total_updates += 1
         if self.total_updates % self.policy_delay == 0:
+            # Reset policy state before batched actor update as well
+            if hasattr(self.actor, 'reset'):
+                self.actor.reset()
             
             a = self.actor(obs)
 

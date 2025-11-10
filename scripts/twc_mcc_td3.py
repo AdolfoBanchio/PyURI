@@ -20,9 +20,7 @@ from mlp import Critic
 from twc import (
     build_twc,
     mcc_obs_encoder,
-    mcc_obs_encoder_speed_weighted,
     twc_out_2_mcc_action,
-    twc_out_2_mcc_action_tanh,
 )
 
 # --- Environment ---
@@ -42,9 +40,9 @@ TAU                = 5e-3
 ACTOR_LR           = 0.00028007729801810964
 CRITIC_LR          = 0.004320799314236164
 
-TWC_INTERNAL_STEPS = 3
+TWC_INTERNAL_STEPS = 1
 CRITIC_HID_LAYERS  = [400, 300]
-DEVICE             = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+DEVICE             = torch.device("cpu")
 
 SIGMA_START, SIGMA_END, SIGMA_DECAY_EPIS = 0.20, 0.05, 100
 
@@ -143,8 +141,8 @@ def main():
     state_dim = env.observation_space.shape[0]
     action_dim = env.action_space.shape[0]
 
-    actor = build_twc(obs_encoder=mcc_obs_encoder_speed_weighted,
-                    action_decoder=twc_out_2_mcc_action_tanh,
+    actor = build_twc(obs_encoder=mcc_obs_encoder,
+                    action_decoder=twc_out_2_mcc_action,
                     internal_steps=TWC_INTERNAL_STEPS,
                     log_stats=False)
 
