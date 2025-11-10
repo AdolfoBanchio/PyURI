@@ -42,7 +42,7 @@ CRITIC_LR          = 0.004320799314236164
 
 TWC_INTERNAL_STEPS = 1
 CRITIC_HID_LAYERS  = [400, 300]
-DEVICE             = torch.device("cpu")
+DEVICE             = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 SIGMA_START, SIGMA_END, SIGMA_DECAY_EPIS = 0.20, 0.05, 100
 

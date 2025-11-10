@@ -34,8 +34,8 @@ MAX_TIME_STEPS     = 999
 # --- Hyperparameters ---
 WARMUP_STEPS       = 10_000
 BATCH_SIZE         = 128
-NUM_UPDATE_LOOPS   = 2
-UPDATE_EVERY       = 1 # This is the policy delay
+NUM_UPDATE_LOOPS   = 1
+UPDATE_EVERY       = 2 # This is the policy delay
 
 GAMMA              = 0.99
 TAU                = 5e-3

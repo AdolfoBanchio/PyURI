@@ -172,6 +172,9 @@ class TD3Engine():
         """
         Performs a single update step for both actor and critic networks
         using Truncated Backpropagation Through Time (BPTT).
+
+        This version is optimized to remove all redundant state cloning,
+        relying on the BPTT-standard 'detach' to truncate the graph.
         """
         
         # 1. Get sequence data and dimensions
@@ -185,7 +188,8 @@ class TD3Engine():
         train_length = L - burn_in_length
         assert train_length > 0, "Sequence length must be > burn_in_length"
 
-        # 2. Burn-in Phase (No Gradients) and with initial states
+        # 2. Burn-in Phase (No Gradients)
+        # Reset states for the start of this sequence batch
         self.actor.reset()
         self.actor_target.reset()
         with torch.no_grad():
@@ -193,18 +197,18 @@ class TD3Engine():
                 _ = self.actor(obs_seq[:, t, :])
                 _ = self.actor_target(obs2_seq[:, t, :])
 
-        # Detach internal states graphs to stop gradients from flowing into the burn-in period.
-        """ if hasattr(self.actor, 'detach'):
+        # Detach internal states to stop gradients from flowing into the burn-in period.
+        # The actor's state is now detached and ready for the actor-loss unroll.
+        if hasattr(self.actor, 'detach'):
             self.actor.detach()
-            self.actor_target.detach() """
+            self.actor_target.detach()
 
         # 4. Training Phase (With Gradients)
         all_critic_losses = []
         
-        # Take a snapshot of actor state right after burn-in
-        actor_state_snapshot = None
-        if hasattr(self.actor, "_state") and self.actor._state is not None:
-            actor_state_snapshot = {k: (v[0].clone(), v[1].clone()) for k, v in self.actor._state.items()}
+        # --- OPTIMIZATION: REMOVED STATE CLONING ---
+        # The actor's state is already detached and preserved post-burn-in.
+        # We no longer need to clone it here.
 
         for t in range(burn_in_length, L):
             # Get data for this time step
@@ -213,7 +217,7 @@ class TD3Engine():
             rew_t = rew_seq[:, t]
             obs2_t = obs2_seq[:, t, :]
             term_t = term_seq[:, t]
-            # Ensure shapes are (B, 1) to avoid broadcasting to (B, B)
+            # Ensure shapes are (B, 1)
             rew_t = rew_t.unsqueeze(1)
             mask_t = (1.0 - term_t).unsqueeze(1)
 
@@ -222,7 +226,7 @@ class TD3Engine():
                 noise = (torch.randn_like(act_t) * self.target_policy_noise).clamp(-self.target_noise_clip,
                                                                                 self.target_noise_clip)
                 
-                # Get next action from target actor, passing the recurrent state
+                # Get next action from target actor, continuing its unroll
                 next_a_t = self.actor_target(obs2_t)
                 next_a_t = (next_a_t + noise).clamp(self.action_low, self.action_high)
                 
@@ -234,14 +238,14 @@ class TD3Engine():
                 q_target = rew_t + self.gamma * mask_t * min_q
 
             # --- 4.2. Update Critic ---
+            # Note: self.actor is NOT used in this loop. Its state remains
+            # the detached, post-burn-in state, ready for the actor update.
             q1 = self.critic_1(obs_t, act_t)
             q2 = self.critic_2(obs_t, act_t)
             critic_loss_t = F.mse_loss(q1, q_target) + F.mse_loss(q2, q_target)
             all_critic_losses.append(critic_loss_t)
 
-            # Do not compute actor loss here; we will do a clean pass after critic update
-
-        # 5. Backpropagate (BPTT)
+        # 5. Backpropagate Critic (BPTT)
         self.critic_optimizer.zero_grad(set_to_none=True)
         critic_loss = torch.stack(all_critic_losses).mean()
         critic_loss.backward()
@@ -253,9 +257,11 @@ class TD3Engine():
         actor_loss = None
         self.total_updates += 1
         if self.total_updates % self.policy_delay == 0:
-            # Restore actor state to the snapshot for a fresh unroll
-            if actor_state_snapshot is not None:
-                self.actor._state = {k: (v[0].clone(), v[1].clone()) for k, v in actor_state_snapshot.items()}
+            
+            # --- OPTIMIZATION: REMOVED STATE RESTORE ---
+            # The actor's state is already in the correct post-burn-in,
+            # detached state. We can just run the forward pass and
+            # BPTT will start from this point, as intended.
 
             # Temporarily freeze critic params so they are treated as constants
             for p in self.critic_1.parameters():
@@ -264,8 +270,9 @@ class TD3Engine():
             all_actor_losses = []
             for t in range(burn_in_length, L):
                 obs_t = obs_seq[:, t, :]
+                # This unroll starts from the detached state, building a new graph
                 a_t = self.actor(obs_t)
-                q_val = self.critic_1(obs_t, a_t)
+                q_val = self.critic_1(obs_t, a_t) # Uses the UPDATED critic_1
                 all_actor_losses.append(-q_val.mean())
 
             actor_loss = torch.stack(all_actor_losses).mean()
