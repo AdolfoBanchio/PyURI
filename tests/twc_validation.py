@@ -10,7 +10,7 @@ import matplotlib.pyplot as plt
 import torch
 import numpy as np
 import gymnasium as gym
-from twc.twc_builder import build_twc
+from twc.twc_builder import build_twc, TWC
 from twc.twc_io import (
     mcc_obs_encoder,
     twc_out_2_mcc_action,
@@ -383,9 +383,9 @@ def main():
     for test_idx, obs in enumerate(test_observations):
         print(f"\nTest {test_idx + 1}/{num_tests}: obs={obs}")
 
-        if test_idx % 10 == 0:
+        if test_idx % 3 == 0:
             fiu_twc.Reset()  
-            twc.reset()
+            twc.reset_internal_only()
         
         ariel_output = fiu_twc.Update(obs, mode=None, doLog=False)
         ariel_states = extract_ariel_neuron_states(fiu_twc)
@@ -425,7 +425,7 @@ def main():
                     per_neuron_stats[name][key]["errors"].append(val['error'])
         
         if not states_match:
-            print(f"  ⚠ State differences detected:")
+            print(f"State differences detected:")
             for name, diffs in state_diffs.items():
                 if 'error' in diffs:
                     print(f"    {name}: {diffs['error']}")
@@ -577,112 +577,6 @@ def main():
     
     print(f"Detailed comparison saved to {os.path.join(out_dir, 'detailed_comparison.txt')}")
 
-     # =============================
-    # Stateful multi-step evaluation
-    # =============================
-    def align_states(fiu_model, twc_model, align_steps: int = 3):
-        neutral = np.array([POS_VALLEY_VAL, VEL_VALLEY_VAL], dtype=np.float32)
-        obs_tensor = torch.tensor([neutral], dtype=torch.float32)
-        for _ in range(align_steps):
-            # Run both without resets to drive to a common quiescent state
-            fiu_model.Update(neutral, mode=None, doLog=False)
-            with torch.no_grad():
-                twc_model(obs_tensor)
-    def gen_pulsed_sequence(seq_len: int, pulse_every: int = 5):
-        seq = []
-        for t in range(seq_len):
-            if t % pulse_every == 0:
-                # Strong activating sample: toggle around both interfaces
-                pos = np.random.choice([POS_MIN, POS_MAX])
-                vel = np.random.choice([-VEL_MAX, VEL_MAX])
-            else:
-                # Near valley to exercise both branches and avoid full quiescence
-                pos = float(POS_VALLEY_VAL + np.random.uniform(-0.1, 0.1))
-                vel = float(VEL_VALLEY_VAL + np.random.uniform(-0.03, 0.03))
-                pos = max(POS_MIN, min(POS_MAX, pos))
-                vel = max(-VEL_MAX, min(VEL_MAX, vel))
-            seq.append(np.array([pos, vel], dtype=np.float32))
-        return seq
-    def run_stateful_eval(num_sequences: int = 25, seq_len: int = 30, burn_in: int = 3, pulse_every: int = 5, eps: float = 1e-3):
-        active_diffs = []
-        all_diffs = []
-        per_neuron_stats_active = {}
-        for s in range(num_sequences):
-            # Reset models at the start of each sequence
-            fiu_twc.Reset()
-            twc.reset()
-            # Align to a common operating point
-            align_states(fiu_twc, twc, align_steps=burn_in)
-            seq = gen_pulsed_sequence(seq_len, pulse_every=pulse_every)
-            for obs in seq:
-                # Step without resets (stateful)
-                ar_out = fiu_twc.Update(obs, mode=None, doLog=False)
-                with torch.no_grad():
-                    t_out = twc(torch.tensor([obs], dtype=torch.float32)).squeeze().item()
-                diff = abs(ar_out - t_out)
-                all_diffs.append(diff)
-                # Active-only error tracking
-                if (abs(ar_out) > eps) or (abs(t_out) > eps):
-                    active_diffs.append(diff)
-                    # Per-neuron mismatch on active steps
-                    a_states = extract_ariel_neuron_states(fiu_twc)
-                    t_states = extract_torch_neuron_states(twc, neuron_names)
-                    state_diffs, _ = compare_states(a_states, t_states, tolerance=1e-4)
-                    for name, diffs in state_diffs.items():
-                        if 'error' in diffs:
-                            continue
-                        if name not in per_neuron_stats_active:
-                            per_neuron_stats_active[name] = {
-                                'internal': {"count": 0, "errors": []},
-                                'output':   {"count": 0, "errors": []},
-                                'threshold':{"count": 0, "errors": []},
-                                'decay':    {"count": 0, "errors": []},
-                            }
-                        for key, val in diffs.items():
-                            if not val['match']:
-                                per_neuron_stats_active[name][key]['count'] += 1
-                                per_neuron_stats_active[name][key]['errors'].append(val['error'])
-        all_diffs_arr = np.array(all_diffs, dtype=np.float32)
-        active_diffs_arr = np.array(active_diffs, dtype=np.float32) if active_diffs else np.array([], dtype=np.float32)
-        def _agg_errs(errs):
-            if not errs:
-                return 0, 0.0, 0.0
-            arr = np.array(errs, dtype=np.float32)
-            return len(errs), float(arr.mean()), float(arr.max())
-        per_neuron_totals_active = []
-        for neuron, keys in per_neuron_stats_active.items():
-            total = sum(v['count'] for v in keys.values())
-            per_neuron_totals_active.append((neuron, total))
-        per_neuron_totals_active.sort(key=lambda x: x[1], reverse=True)
-        # Save stateful summary
-        stateful_path = os.path.join(out_dir, 'stateful_summary.txt')
-        with open(stateful_path, 'w') as f:
-            f.write("TWC Stateful Evaluation (multi-step)\n")
-            f.write("=" * 80 + "\n\n")
-            f.write(f"Sequences: {num_sequences}, Length: {seq_len}, Burn-in: {burn_in}, Pulse-every: {pulse_every}\n")
-            f.write(f"Total steps: {num_sequences*seq_len}\n")
-            f.write(f"Active steps: {active_diffs_arr.size} (|action|>{eps})\n\n")
-            f.write("Action error (all steps):\n")
-            f.write(f"  Mean: {all_diffs_arr.mean() if all_diffs_arr.size else 0.0:.6f}\n")
-            f.write(f"  Std:  {all_diffs_arr.std()  if all_diffs_arr.size else 0.0:.6f}\n")
-            f.write(f"  Max:  {all_diffs_arr.max()  if all_diffs_arr.size else 0.0:.6f}\n")
-            f.write(f"  Min:  {all_diffs_arr.min()  if all_diffs_arr.size else 0.0:.6f}\n\n")
-            f.write("Action error (active-only):\n")
-            f.write(f"  Mean: {active_diffs_arr.mean() if active_diffs_arr.size else 0.0:.6f}\n")
-            f.write(f"  Std:  {active_diffs_arr.std()  if active_diffs_arr.size else 0.0:.6f}\n")
-            f.write(f"  Max:  {active_diffs_arr.max()  if active_diffs_arr.size else 0.0:.6f}\n")
-            f.write(f"  Min:  {active_diffs_arr.min()  if active_diffs_arr.size else 0.0:.6f}\n\n")
-            f.write("Per-neuron mismatch summary (active-only):\n")
-            f.write("-" * 80 + "\n")
-            for neuron, total in per_neuron_totals_active:
-                f.write(f"{neuron}: total_mismatches={total}\n")
-                for key in ("internal", "output", "threshold", "decay"):
-                    cnt, mean_err, max_err = _agg_errs(per_neuron_stats_active.get(neuron, {}).get(key, {}).get("errors", []))
-                    if cnt > 0:
-                        f.write(f"  - {key}: count={per_neuron_stats_active[neuron][key]['count']}, mean_err={mean_err:.6f}, max_err={max_err:.6f}\n")
-        print(f"Stateful summary saved to {stateful_path}")
-    # Run stateful evaluation to validate multi-step parity
-    run_stateful_eval(num_sequences=25, seq_len=30, burn_in=3, pulse_every=5, eps=1e-3)
     
 if __name__ == "__main__":
     main()

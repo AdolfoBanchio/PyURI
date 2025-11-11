@@ -7,81 +7,35 @@ from torch import nn
 from fiuri import FIURIModule, FiuriDenseConn, FiuriSparseGJConn
 from .w_builder import build_tw_matrices
 
-json_path = os.path.join(os.path.dirname(__file__), "TWC_fiu.json")
-
-def build_twc(obs_encoder: Callable,
-              action_decoder: Callable,
-              internal_steps: int,
-              log_stats: bool = True) -> nn.Module:
-    """ Extracts the data from thr TWC description
-    and returns a nn.Module with the TWC implementation
-    """
-    dev = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-
-    with open(json_path, "r") as f:
-        net_data = json.load(f)
-
-    masks, sizes = build_tw_matrices(net_data)
-
-    n_in, n_hid, n_out = sizes["n_in"], sizes["n_hid"], sizes["n_out"]
-
-    in_layer =  FIURIModule(
-        num_cells=n_in,
-        initial_in_state=0.0,
-        initial_out_state=0.0,
-        initial_threshold=0.0,
-        initial_decay=0.1,
-        clamp_min=-10.0,
-        clamp_max=10.0,
-    )
-    hid_layer = FIURIModule(
-        num_cells=n_hid,
-        initial_in_state=0.0,
-        initial_out_state=0.0,
-        initial_threshold=0.0,
-        initial_decay=0.1,
-        clamp_min=-10.0,
-        clamp_max=10.0,
-    )
-    out_layer = FIURIModule(
-        num_cells=n_out,
-        initial_in_state=0.0,
-        initial_out_state=0.0,
-        initial_threshold=0.0,
-        initial_decay=0.1,
-        clamp_min=-10.0,
-        clamp_max=10.0,
-    )
-
-    in2hid = FiuriDenseConn(n_pre=n_in, n_post=n_hid,w_mask=masks["in2hid"]["IN"], type="IN")
-    hid_IN = FiuriDenseConn(n_pre=n_hid, n_post=n_hid, w_mask=masks["hid"]["IN"], type="IN")
-    hid_EX = FiuriDenseConn(n_pre=n_hid, n_post=n_hid, w_mask=masks["hid"]["EX"], type="EX")
-    hid2out_EX = FiuriDenseConn(n_pre=n_hid, n_post=n_out, w_mask=masks["hid2out"]["EX"], type="EX")
-
-    # create the only GJ sparse conn
-    # PLM -> PVC, AVM -> AVD
-    gj_edges = torch.tensor([[1, 2],   # src (PLM=1, AVM=2)
-                             [2, 1]])  # dst (PVC=2, AVD=1)
-    gj_conn = FiuriSparseGJConn(n_pre=n_in, n_post=n_hid, gj_edges=gj_edges)
-
-    
-    class TWC (nn.Module):
+class TWC (nn.Module):
         """  
         When creating the module a proper input decoder to the 4 sensory neurons must be provided
         if you plan to pass raw observations. Decoder must accept keyword args
         n_inputs and device (compatible with utils.twc_io_wrapper.default_obs_encoder).
      
         """
-        def __init__(self, *args, **kwargs):
-            super().__init__(*args, **kwargs)
+        def __init__(self, in_layer: FIURIModule,
+                    hid_layer: FIURIModule,
+                    out_layer: FIURIModule,
+                    in2hid_IN: FiuriDenseConn,
+                    in2hid_GJ: FiuriSparseGJConn,
+                    hid_IN: FiuriDenseConn,
+                    hid_EX: FiuriDenseConn,
+                    hid2out_EX: FiuriDenseConn,
+                    obs_encoder: Callable,
+                    action_decoder: Callable,
+                    internal_steps: int,
+                    log_stats: bool = True,
+                    **kwargs):
+            super().__init__(**kwargs)
             # neuron layers
             self.in_layer = in_layer
             self.hid_layer = hid_layer
             self.out_layer = out_layer
 
             # connections
-            self.in2hid_IN = in2hid
-            self.in2hid_GJ = gj_conn
+            self.in2hid_IN = in2hid_IN
+            self.in2hid_GJ = in2hid_GJ
 
             self.hid_IN = hid_IN
             self.hid_EX = hid_EX
@@ -298,6 +252,73 @@ def build_twc(obs_encoder: Callable,
                 for conn in dense_conns:
                     conn.w.fill_(softplus_inv_one)
                 self.in2hid_GJ.gj_w.fill_(softplus_inv_one)
-        
 
-    return TWC()
+json_path = os.path.join(os.path.dirname(__file__), "TWC_fiu.json")
+
+def build_twc(obs_encoder: Callable,
+              action_decoder: Callable,
+              internal_steps: int,
+              log_stats: bool = True) -> TWC:
+    """ Extracts the data from thr TWC description
+    and returns a nn.Module with the TWC implementation
+    """
+    dev = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+    with open(json_path, "r") as f:
+        net_data = json.load(f)
+
+    masks, sizes = build_tw_matrices(net_data)
+
+    n_in, n_hid, n_out = sizes["n_in"], sizes["n_hid"], sizes["n_out"]
+
+    in_layer =  FIURIModule(
+        num_cells=n_in,
+        initial_in_state=0.0,
+        initial_out_state=0.0,
+        initial_threshold=0.0,
+        initial_decay=0.1,
+        clamp_min=-10.0,
+        clamp_max=10.0,
+    )
+    hid_layer = FIURIModule(
+        num_cells=n_hid,
+        initial_in_state=0.0,
+        initial_out_state=0.0,
+        initial_threshold=0.0,
+        initial_decay=0.1,
+        clamp_min=-10.0,
+        clamp_max=10.0,
+    )
+    out_layer = FIURIModule(
+        num_cells=n_out,
+        initial_in_state=0.0,
+        initial_out_state=0.0,
+        initial_threshold=0.0,
+        initial_decay=0.1,
+        clamp_min=-10.0,
+        clamp_max=10.0,
+    )
+
+    in2hid = FiuriDenseConn(n_pre=n_in, n_post=n_hid,w_mask=masks["in2hid"]["IN"], type="IN")
+    hid_IN = FiuriDenseConn(n_pre=n_hid, n_post=n_hid, w_mask=masks["hid"]["IN"], type="IN")
+    hid_EX = FiuriDenseConn(n_pre=n_hid, n_post=n_hid, w_mask=masks["hid"]["EX"], type="EX")
+    hid2out_EX = FiuriDenseConn(n_pre=n_hid, n_post=n_out, w_mask=masks["hid2out"]["EX"], type="EX")
+
+    # create the only GJ sparse conn
+    # PLM -> PVC, AVM -> AVD
+    gj_edges = torch.tensor([[1, 2],   # src (PLM=1, AVM=2)
+                             [2, 1]])  # dst (PVC=2, AVD=1)
+    gj_conn = FiuriSparseGJConn(n_pre=n_in, n_post=n_hid, gj_edges=gj_edges)
+
+    return TWC(in_layer=in_layer, 
+               hid_layer=hid_layer, 
+               out_layer=out_layer, 
+               in2hid_IN=in2hid, 
+               in2hid_GJ=gj_conn, 
+               hid_IN=hid_IN, 
+               hid_EX=hid_EX, 
+               hid2out_EX=hid2out_EX, 
+               obs_encoder=obs_encoder, 
+               action_decoder=action_decoder, 
+               internal_steps=internal_steps, 
+               log_stats=log_stats)
