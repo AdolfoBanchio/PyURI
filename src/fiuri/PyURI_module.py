@@ -126,14 +126,11 @@ class FIURIModule(nn.Module):
         Calculates new (E, O) state from S, E, T, and D.
         """
         # Match ariel's exact equality check: currState==self.internalstate
-        #eps = 1e-6
-        #eqE = torch.isclose(S, E, atol=eps, rtol=1e-5)
         eqE = S == E
         gt = S > T
         mask = (~gt) & eqE
 
         new_o = F.relu(S - T)
-        #new_o = F.leaky_relu(S - T, negative_slope=0.02)
         new_e = torch.where(S > T, new_o, torch.where(mask, E - D, S))
         return new_o, (new_e, new_o)
 
@@ -241,3 +238,171 @@ class FiuriSparseGJConn(nn.Module):
         # Return positive weights to respect GJ constraint
         w_pos = F.softplus(self.gj_w)
         return (self.gj_idx[0], self.gj_idx[1], w_pos)
+
+# Gradient flow improvement implementation
+
+class FIURIModuleV2(nn.Module):
+    """  
+    Nerual layer of the FIURI model. (fully pytorch)
+    Sn = En + sum(I_jin) j=1..m where m is ammount of connections(9) 
+         
+    Ij in = 
+            ωj * Oj if Oj ≥ En y gap junct. 
+            -ωj * Oj if Oj < En y gap junct. 
+            ωj * Oj chemical excitatory 
+            -ωj * Oj chemical inhibitory
+    where Oj is the output state of the presynaptic neuron j and ωj is the weight of the connection from neuron j to neuron n.
+    
+    On = ( Sn- Tn if Sn > Tn 
+         ( 0 other case (10) 
+    
+        | Sn - Tn if Sn > Tn
+    En =  En - dn if Sn ≤ Tn and Sn = En  (11) 
+        \ Sn other case  
+    
+    where:
+        - En and On represent the internal state and the output state of neuron n, respectively. (not learnable)
+        - Sn represents the stimiulus comming through the connections due to the currents Ij_in.
+        - Eqs 10,11 represent the dynamic of the neuron.
+        - Tn and dn are the neuronal parameters that have to be learned and represent:
+            - Tn the firing threshold
+            - dn the decay factor (due to not enough stimulus)
+    
+    Each neuron has 3 channels for communication with FIURI_connections
+        - 0: EX
+        - 1: IN
+        - 2: GJ
+    """
+    def __init__(
+        self,
+        num_cells: Optional[int] = None,
+        initial_in_state: Optional[float] = 0.0,   # scalar default
+        initial_out_state: Optional[float] = 0.0,  # scalar default
+        initial_threshold: Optional[float] = 1.0,
+        initial_decay: Optional[float] = 0.1,
+        clamp_min: float = -10.0,
+        clamp_max: float = 10.0,
+        rnd_init: bool = False,
+
+        # SG- parameters
+        steepness_gj: float = 10.0,
+        steepness_fire: float = 10.0,
+        steepness_input: float = 5.0,
+        input_thresh: float = 0.01,
+        leaky_slope: float = 0.01,
+        **kwargs,
+    ) -> None:
+        super().__init__()
+        assert (num_cells is not None), "Must provide number of neurons per layer"      
+        # save num of cells
+        self.num_cells = num_cells
+
+        self.steepness_gj = steepness_gj
+        self.steepness_fire = steepness_fire
+        self.steepness_input = steepness_input
+        self.input_thresh = input_thresh
+        self.leaky_slope = leaky_slope
+
+        # --- learnable per-neuron parameters (shape: (n,))
+        self.threshold = nn.Parameter(torch.empty(num_cells), requires_grad=True) 
+        self.decay     = nn.Parameter(torch.empty(num_cells), requires_grad=True)
+        
+        if rnd_init:
+            nn.init.uniform_(self.threshold, -1.0, 2.0)
+            nn.init.uniform_(self.decay, 0.05, 1.0)
+        else:
+            nn.init.constant_(self.threshold, initial_threshold)
+            nn.init.constant_(self.decay, initial_decay)
+        
+        self._init_E = float(initial_in_state)
+        self._init_O = float(initial_out_state)
+        # clamp range for S_n (optional)
+        self.clamp_min = clamp_min
+        self.clamp_max = clamp_max
+
+
+    def _compute_gj_sum(self, gj_bundle, o_pre: torch.Tensor, current_in_state: torch.Tensor, out_buffer: torch.Tensor) -> None:
+        """
+        Computes GJ sum and scatters it IN-PLACE into out_buffer.
+        """
+        src, dst, w = gj_bundle
+        if src.numel() == 0:
+            return  # No-op, out_buffer is unchanged
+
+        B = o_pre.size(0)
+        Oj = o_pre[:, src]              # (B, E_gj)
+        En = current_in_state[:, dst]   # (B, E_gj)
+        
+        sgn = torch.tanh(self.steepness_gj * (Oj - En)) # Soft sign
+        contrib = Oj * w * sgn          # (B, E_gj)
+
+        # out buffer modified in-place
+        _scatter_add_batched(contrib, dst, out_buffer)
+
+    def _calculate_new_state(self, S, E, T, D):
+        """
+        Calculates new (E, O) state from S, E, T, and D.
+        in a differentiable way.
+        """
+        # leaky relu allows some gradient flow when S < T
+        new_o = F.leaky_relu(S - T, negative_slope=self.leaky_slope)
+        
+        # we force positive D trying to enforce training stability
+        D_positive = F.softplus(D) 
+        
+        # instead of hard conditions, we use smooth gates
+        # fire probability gate
+        fire_prob = torch.sigmoid(self.steepness_fire * (S - T))
+        
+        #  ~0 if S == E, y ~1 if S != E.
+        diff = torch.abs(S - E)
+        input_prob = torch.sigmoid(self.steepness_input * (diff - self.input_thresh))
+        
+        # -3 output cases:
+        E_fired = new_o          # 1: (S > T) -> E_next = O_next
+        E_decay = E - D_positive # 2: (S == E) -> E_next = E - D. 
+        E_subthresh = S          # 3: (S <= T y S != E) -> E_next = S.
+
+        # Use soft gates to combine cases:
+        # E_nonfired = (if S != E: E_subthresh else: E_decay)
+        E_nonfired = input_prob * E_subthresh + (1 - input_prob) * E_decay
+        
+        # Combinar lógica "disparo" vs "no-disparo"
+        # new_e = (if S > T: E_fired else: E_nonfired)
+        new_e = fire_prob * E_fired + (1 - fire_prob) * E_nonfired
+        
+        return new_o, (new_e, new_o)
+
+    def neuron_step(self, state):
+        """
+        Performs one step of the neuron dynamics.
+        If S is None, uses S = in_state (i.e., as if input_current were zero).
+        """
+        E, O = state if state else (self._init_E, self._init_O)
+        S = torch.clamp(E, self.clamp_min, self.clamp_max)
+
+        return self._calculate_new_state(S, E, self.threshold, self.decay)
+
+    def forward(self, chem_influence, state = None, gj_bundle = None, o_pre = None) -> torch.Tensor:
+        B = chem_influence.size(0)
+        
+        # Extract current state for use in gap junction computation
+        E, O = state if state else (self._init_E, self._init_O)
+        
+        if gj_bundle is not None:
+            assert o_pre is not None, "o_pre must be provided when gj_bundle is not None"
+            # Pass current state to gap junction computation
+            current_E_tensor = E if isinstance(E, torch.Tensor) else torch.full((B, self.num_cells), E, dtype=chem_influence.dtype, device=chem_influence.device)
+            
+            self._compute_gj_sum(
+                gj_bundle, 
+                o_pre, 
+                current_in_state=current_E_tensor, 
+                out_buffer=chem_influence
+            )
+            # chem_influence is now (original chem_influence + gj_sum)
+        
+        # Note: E is still the *original* state[0]
+        S = torch.clamp(E + chem_influence, self.clamp_min, self.clamp_max)
+
+        return self._calculate_new_state(S, E, self.threshold, self.decay)
