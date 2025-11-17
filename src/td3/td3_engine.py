@@ -6,6 +6,7 @@ import numpy as np
 import gymnasium as gym
 from tqdm import tqdm
 from copy import deepcopy
+from twc.twc_builder import TWC
 
 class TD3Engine():
     """  
@@ -17,7 +18,7 @@ class TD3Engine():
                  tau: float,
                  observation_space: gym.Space,
                  action_space: gym.Space,
-                 actor: nn.Module,
+                 actor: TWC,
                  critic_1: nn.Module,
                  critic_2: nn.Module,
                  actor_optimizer: torch.optim.Optimizer,
@@ -67,10 +68,8 @@ class TD3Engine():
     def get_action(self, state, action_noise=None):
         s = torch.as_tensor(state, dtype=torch.float32, device=self.device).unsqueeze(0)
         
-        self.actor.eval()
         with torch.no_grad():
             a = self.actor(s)
-        self.actor.train()
 
         a = a.squeeze(0)
         if action_noise is not None:
@@ -168,6 +167,15 @@ class TD3Engine():
             
         return actor_loss_r , critic_loss.item()
 
+    def _detach_state_dict(self, state_dict: dict[str, tuple[torch.Tensor, torch.Tensor]]):
+        """
+        Helper method: Detaches all tensors in a state dictionary from the graph.
+        """
+        return {
+            name: (state_pair[0].detach(), state_pair[1].detach())
+            for name, state_pair in state_dict.items()
+        }
+    
     def update_step_bptt(self, batch_of_sequences: dict, burn_in_length: int):
         """
         Performs a single update step for both actor and critic networks
@@ -183,71 +191,55 @@ class TD3Engine():
         rew_seq = batch_of_sequences['reward'].to(self.device)
         obs2_seq = batch_of_sequences['next_obs'].to(self.device)
         term_seq = batch_of_sequences['done'].to(self.device) # Use 'done' from buffer
-
+        
         B, L, _ = obs_seq.shape
         train_length = L - burn_in_length
         assert train_length > 0, "Sequence length must be > burn_in_length"
 
         # 2. Burn-in Phase (No Gradients)
         # Reset states for the start of this sequence batch
-        self.actor.reset()
-        self.actor_target.reset()
+        state_a = self.actor.get_initial_state(B, self.device)    
+        state_at = self.actor_target.get_initial_state(B, self.device)
+
         with torch.no_grad():
             for t in range(burn_in_length):
-                _ = self.actor(obs_seq[:, t, :])
-                _ = self.actor_target(obs2_seq[:, t, :])
+                _, state_a = self.actor.forward_bptt(obs_seq[:, t, :], state_a)
+                _, state_at = self.actor_target.forward_bptt(obs2_seq[:, t, :], state_at)
 
         # Detach internal states to stop gradients from flowing into the burn-in period.
         # The actor's state is now detached and ready for the actor-loss unroll.
-        if hasattr(self.actor, 'detach'):
-            self.actor.detach()
-            self.actor_target.detach()
+        state_a = self._detach_state_dict(state_a)
+        state_at = self._detach_state_dict(state_at)
 
-        # 4. Training Phase (With Gradients)
-        all_critic_losses = []
-        
-        # --- OPTIMIZATION: REMOVED STATE CLONING ---
-        # The actor's state is already detached and preserved post-burn-in.
-        # We no longer need to clone it here.
-
+        self.critic_optimizer.zero_grad(set_to_none=True)
+        critic_loss = 0.0
         for t in range(burn_in_length, L):
-            # Get data for this time step
-            obs_t = obs_seq[:, t, :]
+            obs_t = obs_seq[:, t, :] 
             act_t = act_seq[:, t, :]
-            rew_t = rew_seq[:, t]
+            rew_t = rew_seq[:, t].unsqueeze(1)
             obs2_t = obs2_seq[:, t, :]
-            term_t = term_seq[:, t]
-            # Ensure shapes are (B, 1)
-            rew_t = rew_t.unsqueeze(1)
-            mask_t = (1.0 - term_t).unsqueeze(1)
+            mask_t = (1.0 - term_seq[:, t]).unsqueeze(1)
 
-            # --- 4.1. Compute Targets ---
             with torch.no_grad():
-                noise = (torch.randn_like(act_t) * self.target_policy_noise).clamp(-self.target_noise_clip,
-                                                                                self.target_noise_clip)
-                
-                # Get next action from target actor, continuing its unroll
-                next_a_t = self.actor_target(obs2_t)
+                noise = (torch.randn_like(act_t) * self.target_policy_noise).clamp(-self.target_noise_clip, self.target_noise_clip)
+                next_a_t, state_at = self.actor_target.forward_bptt(obs2_t, state_at)
                 next_a_t = (next_a_t + noise).clamp(self.action_low, self.action_high)
-                
-                # Critics are stateless
+
                 q1_t = self.critic_1_target(obs2_t, next_a_t)
                 q2_t = self.critic_2_target(obs2_t, next_a_t)
                 min_q = torch.minimum(q1_t, q2_t)
-                
+
                 q_target = rew_t + self.gamma * mask_t * min_q
 
-            # --- 4.2. Update Critic ---
-            # Note: self.actor is NOT used in this loop. Its state remains
-            # the detached, post-burn-in state, ready for the actor update.
             q1 = self.critic_1(obs_t, act_t)
             q2 = self.critic_2(obs_t, act_t)
             critic_loss_t = F.mse_loss(q1, q_target) + F.mse_loss(q2, q_target)
-            all_critic_losses.append(critic_loss_t)
+            
+            # --- ACCUMULATE LOSS ---
+            critic_loss = critic_loss + critic_loss_t
 
-        # 5. Backpropagate Critic (BPTT)
-        self.critic_optimizer.zero_grad(set_to_none=True)
-        critic_loss = torch.stack(all_critic_losses).mean()
+        # Average the loss and backpropagate
+        critic_loss = critic_loss / (L - burn_in_length)
         critic_loss.backward()
         # Clip gradients - ESSENTIAL for recurrent networks
         torch.nn.utils.clip_grad_norm_(itertools.chain(self.critic_1.parameters(), self.critic_2.parameters()), 1.0)
@@ -257,25 +249,19 @@ class TD3Engine():
         actor_loss = None
         self.total_updates += 1
         if self.total_updates % self.policy_delay == 0:
-            
-            # --- OPTIMIZATION: REMOVED STATE RESTORE ---
-            # The actor's state is already in the correct post-burn-in,
-            # detached state. We can just run the forward pass and
-            # BPTT will start from this point, as intended.
-
             # Temporarily freeze critic params so they are treated as constants
             for p in self.critic_1.parameters():
                 p.requires_grad_(False)
 
-            all_actor_losses = []
+            actor_loss = 0.0
             for t in range(burn_in_length, L):
                 obs_t = obs_seq[:, t, :]
-                # This unroll starts from the detached state, building a new graph
-                a_t = self.actor(obs_t)
-                q_val = self.critic_1(obs_t, a_t) # Uses the UPDATED critic_1
-                all_actor_losses.append(-q_val.mean())
+                a_t, state_a = self.actor.forward_bptt(obs_t, state_a)
+                q_val = self.critic_1(obs_t, a_t)
+                
+                actor_loss = actor_loss - q_val.mean()
 
-            actor_loss = torch.stack(all_actor_losses).mean()
+            actor_loss = actor_loss / (L - burn_in_length)
 
             # Restore critic params to require grad for future critic updates
             for p in self.critic_1.parameters():

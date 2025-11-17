@@ -31,20 +31,10 @@ def get_actor(model_path: str, env: gym.Env, hidden_sizes=None) -> torch.nn.Modu
     if not model_path.exists():
         raise FileNotFoundError(f"Model checkpoint not found: {model_path}")
 
-    if "twc" in model_path.name.lower():
-        actor = build_twc(
-            obs_encoder=mcc_obs_encoder, action_decoder=twc_out_2_mcc_action, log_stats=False, internal_steps=3
-        )
-    else:
-        state_dim = env.observation_space.shape[0]
-        action_dim = env.action_space.shape[0]
-        hidden_sizes = hidden_sizes or DEFAULT_ACTOR_HIDDEN
-        actor = Actor(
-            state_dim=state_dim,
-            action_dim=action_dim,
-            max_action=float(env.action_space.high[0]),
-            size=hidden_sizes,
-        )
+    actor = build_twc(obs_encoder=mcc_obs_encoder, 
+                      action_decoder=twc_out_2_mcc_action, 
+                      log_stats=False, 
+                      internal_steps=1)
 
     state_dict = torch.load(model_path, map_location=DEVICE)
     print(state_dict)
@@ -243,7 +233,7 @@ def parse_args():
     parser.add_argument(
         "--reports-dir",
         type=str,
-        default="reports",
+        default="out/reports",
         help="Directory where the CSV report will be stored.",
     )
     parser.add_argument(

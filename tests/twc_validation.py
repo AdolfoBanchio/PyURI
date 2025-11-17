@@ -341,6 +341,9 @@ def main():
         obs_encoder=mcc_obs_encoder,
         action_decoder=twc_out_2_mcc_action,
         internal_steps=1,  # Match ariel's single step
+        initial_thresholds=[0.0,0.0,0.0],
+        initial_decays=[0.1,0.1,0.1],
+        rnd_init=True,
         log_stats=True,
     )
     twc.eval()
@@ -352,13 +355,20 @@ def main():
     fiu_twc.Reset()
     
     print("Synchronizing weights and parameters (Torch -> Ariel)...")
+        
+     
     sync_weights_from_torch_to_ariel(twc, fiu_twc, neuron_names)
     sync_neuron_params_from_torch_to_ariel(twc, fiu_twc, neuron_names)
+   
+   
+    """ sync_neuron_params_from_ariel_to_torch(fiu_model=fiu_twc,
+                                           twc=twc,
+                                           neuron_names_by_layer=neuron_names)
+    sync_weights_from_ariel_to_torch(fiu_model=fiu_twc,
+                                     twc=twc,
+                                     neuron_names_by_layer=neuron_names)
     
-    # Reset both models
-    #fiu_twc.Reset()
-    #twc.reset()
-    
+     """
     # Generate test observations
     num_tests = 1000
     test_observations = []
@@ -381,12 +391,13 @@ def main():
     print("=" * 80)
     
     for test_idx, obs in enumerate(test_observations):
-        print(f"\nTest {test_idx + 1}/{num_tests}: obs={obs}")
 
-        if test_idx % 3 == 0:
+        if test_idx % 10 == 0:
             fiu_twc.Reset()  
             twc.reset_internal_only()
-        
+            print("Reseted state")
+
+        print(f"\nTest {test_idx + 1}/{num_tests}: obs={obs}")
         ariel_output = fiu_twc.Update(obs, mode=None, doLog=False)
         ariel_states = extract_ariel_neuron_states(fiu_twc)
         ariel_outputs.append(ariel_output)
@@ -527,8 +538,100 @@ def main():
     plt.savefig(os.path.join(out_dir, 'twc_comparison.png'), dpi=150)
     print(f"\nVisualization saved to {os.path.join(out_dir, 'twc_comparison.png')}")
     
+    
     # Save detailed comparison to file
     with open(os.path.join(out_dir, 'detailed_comparison.txt'), 'w') as f:
+        # Save each model parameters for reference into the same txt file
+        f.write("Model Parameters\n")
+        f.write("=" * 80 + "\n\n")
+        # Torch TWC parameters
+        f.write("Torch TWC parameters:\n")
+        f.write("-" * 80 + "\n")
+        # Layer params (threshold, decay)
+        f.write("Layers (threshold, decay):\n")
+        for layer_name, layer_module, names in (
+            ("input", twc.in_layer, neuron_names["input"]),
+            ("hidden", twc.hid_layer, neuron_names["hidden"]),
+            ("output", twc.out_layer, neuron_names["output"]),
+        ):
+            f.write(f"  {layer_name}:\n")
+            for i, n in enumerate(names):
+                th = float(twc.in_layer.threshold[i].item()) if layer_name == "input" else (
+                     float(twc.hid_layer.threshold[i].item()) if layer_name == "hidden" else float(twc.out_layer.threshold[i].item()))
+                dc = float(twc.in_layer.decay[i].item()) if layer_name == "input" else (
+                     float(twc.hid_layer.decay[i].item()) if layer_name == "hidden" else float(twc.out_layer.decay[i].item()))
+                f.write(f"    {n}: threshold={th:.6f}, decay={dc:.6f}\n")
+        f.write("\n")
+
+        # Connection params (effective weights after softplus and mask)
+        sp = torch.nn.functional.softplus
+        f.write("Connections (effective weights):\n")
+        # in2hid_IN
+        f.write("  in2hid_IN (ChemIn):\n")
+        for i, src in enumerate(neuron_names["input"]):
+            for j, dst in enumerate(neuron_names["hidden"]):
+                mask_val = float(twc.in2hid_IN.w_mask[i, j].item()) if hasattr(twc.in2hid_IN, "w_mask") else 1.0
+                if mask_val > 0.0:
+                    w_eff = float(sp(twc.in2hid_IN.w[i, j]).item() * mask_val)
+                    f.write(f"    {src} -> {dst}: {w_eff:.6f}\n")
+        # hid_IN
+        f.write("  hid_IN (ChemIn):\n")
+        for i, src in enumerate(neuron_names["hidden"]):
+            for j, dst in enumerate(neuron_names["hidden"]):
+                mask_val = float(twc.hid_IN.w_mask[i, j].item()) if hasattr(twc.hid_IN, "w_mask") else 1.0
+                if mask_val > 0.0:
+                    w_eff = float(sp(twc.hid_IN.w[i, j]).item() * mask_val)
+                    f.write(f"    {src} -> {dst}: {w_eff:.6f}\n")
+        # hid_EX
+        f.write("  hid_EX (ChemEx):\n")
+        for i, src in enumerate(neuron_names["hidden"]):
+            for j, dst in enumerate(neuron_names["hidden"]):
+                mask_val = float(twc.hid_EX.w_mask[i, j].item()) if hasattr(twc.hid_EX, "w_mask") else 1.0
+                if mask_val > 0.0:
+                    w_eff = float(sp(twc.hid_EX.w[i, j]).item() * mask_val)
+                    f.write(f"    {src} -> {dst}: {w_eff:.6f}\n")
+        # hid2out
+        f.write("  hid2out_EX (ChemEx):\n")
+        for i, src in enumerate(neuron_names["hidden"]):
+            for j, dst in enumerate(neuron_names["output"]):
+                mask_val = float(twc.hid2out.w_mask[i, j].item()) if hasattr(twc.hid2out, "w_mask") else 1.0
+                if mask_val > 0.0:
+                    w_eff = float(sp(twc.hid2out.w[i, j]).item() * mask_val)
+                    f.write(f"    {src} -> {dst}: {w_eff:.6f}\n")
+        # Gap junctions
+        if hasattr(twc, "in2hid_GJ") and hasattr(twc.in2hid_GJ, "gj_idx"):
+            f.write("  in2hid_GJ (GJ):\n")
+            gj_src = twc.in2hid_GJ.gj_idx[0]
+            gj_dst = twc.in2hid_GJ.gj_idx[1]
+            for e in range(gj_src.shape[0]):
+                si = int(gj_src[e].item())
+                di = int(gj_dst[e].item())
+                src = neuron_names["input"][si]
+                dst = neuron_names["hidden"][di]
+                w_eff = float(sp(twc.in2hid_GJ.gj_w[e]).item())
+                f.write(f"    {src} -> {dst}: {w_eff:.6f}\n")
+        f.write("\n")
+
+        # Ariel FIU parameters
+        f.write("Ariel FIU parameters:\n")
+        f.write("-" * 80 + "\n")
+        # Neuron params
+        f.write("Neurons (threshold, decay):\n")
+        for n in fiu_twc.neuralnetwork.getNeuronNames():
+            neuron = fiu_twc.getNeuron(n)
+            f.write(
+                f"  {n}: threshold={neuron.getTestThreshold():.6f}, decay={neuron.getTestDecayFactor():.6f}\n"
+            )
+        # Connection params
+        f.write("\nConnections (weights):\n")
+        for conn in fiu_twc.neuralnetwork.getConnections():
+            src = conn.getSource().getName()
+            dst = conn.getTarget().getName()
+            ctype = str(conn.connType)
+            w = conn.getTestWeight()
+            f.write(f"  {src} -> {dst} [{ctype}]: {w:.6f}\n")
+        f.write("\n")
+        # Save detailed summary
         f.write("TWC Implementation Comparison\n")
         f.write("=" * 80 + "\n\n")
         f.write(f"Number of test cases: {num_tests}\n\n")

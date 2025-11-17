@@ -69,6 +69,7 @@ class FIURIModule(nn.Module):
         initial_decay: Optional[float] = 0.1,
         clamp_min: float = -10.0,
         clamp_max: float = 10.0,
+        rnd_init: bool = False,
         **kwargs,
     ) -> None:
         super().__init__()
@@ -76,15 +77,26 @@ class FIURIModule(nn.Module):
         # save num of cells
         self.num_cells = num_cells
         # --- learnable per-neuron parameters (shape: (n,))
-        t_init = torch.full((num_cells,), float(initial_threshold), dtype=torch.float32)
-        d_init = torch.full((num_cells,), float(initial_decay),    dtype=torch.float32)
-
-        self.threshold = nn.Parameter(t_init, requires_grad=True) 
-        self.decay     = nn.Parameter(d_init, requires_grad=True)
+        # Create uninitialized parameters first
+        self.threshold = nn.Parameter(torch.empty(num_cells), requires_grad=True) 
+        self.decay     = nn.Parameter(torch.empty(num_cells), requires_grad=True)
+        
+        if rnd_init:
+            # Initialize threshold around the default 1.0, but with variance.
+            # A range from 0.5 to 1.5 is a sensible, strictly positive start.
+            nn.init.uniform_(self.threshold, -1.0, 2.0)
+            
+            # Initialize decay as a small positive number around the default 0.1.
+            # A range from 0.05 to 0.2 keeps it in a stable region.
+            nn.init.uniform_(self.decay, 0.05, 1.0)
+        else:
+            # --- Original Behavior ---
+            # Use nn.init.constant_ for clarity
+            nn.init.constant_(self.threshold, initial_threshold)
+            nn.init.constant_(self.decay, initial_decay)
         
         self._init_E = float(initial_in_state)
         self._init_O = float(initial_out_state)
-
         # clamp range for S_n (optional)
         self.clamp_min = clamp_min
         self.clamp_max = clamp_max
@@ -106,22 +118,22 @@ class FIURIModule(nn.Module):
         #sgn = torch.where(Oj >= En, Oj.new_ones(Oj.shape), -Oj.new_ones(Oj.shape))
         contrib = Oj * w * sgn          # (B, E_gj)
 
-        # --- OPTIMIZATION 1: Accumulate directly into the provided buffer ---
         _scatter_add_batched(contrib, dst, out_buffer)
         # No return value, as out_buffer is modified in-place
 
     def _calculate_new_state(self, S, E, T, D):
         """
-        --- OPTIMIZATION 3: Factored-out state update logic ---
         Calculates new (E, O) state from S, E, T, and D.
         """
         # Match ariel's exact equality check: currState==self.internalstate
+        #eps = 1e-6
+        #eqE = torch.isclose(S, E, atol=eps, rtol=1e-5)
         eqE = S == E
-
         gt = S > T
         mask = (~gt) & eqE
 
         new_o = F.relu(S - T)
+        #new_o = F.leaky_relu(S - T, negative_slope=0.02)
         new_e = torch.where(S > T, new_o, torch.where(mask, E - D, S))
         return new_o, (new_e, new_o)
 
@@ -133,7 +145,6 @@ class FIURIModule(nn.Module):
         E, O = state if state else (self._init_E, self._init_O)
         S = torch.clamp(E, self.clamp_min, self.clamp_max)
 
-        # --- OPTIMIZATION 3: Use factored-out logic ---
         return self._calculate_new_state(S, E, self.threshold, self.decay)
 
     def forward(self, chem_influence, state = None, gj_bundle = None, o_pre = None) -> torch.Tensor:
@@ -147,7 +158,6 @@ class FIURIModule(nn.Module):
             # Pass current state to gap junction computation
             current_E_tensor = E if isinstance(E, torch.Tensor) else torch.full((B, self.num_cells), E, dtype=chem_influence.dtype, device=chem_influence.device)
             
-            # --- OPTIMIZATION 1: Pass chem_influence as out_buffer ---
             self._compute_gj_sum(
                 gj_bundle, 
                 o_pre, 
@@ -159,7 +169,6 @@ class FIURIModule(nn.Module):
         # Note: E is still the *original* state[0]
         S = torch.clamp(E + chem_influence, self.clamp_min, self.clamp_max)
 
-        # --- OPTIMIZATION 3: Use factored-out logic ---
         return self._calculate_new_state(S, E, self.threshold, self.decay)
     
 

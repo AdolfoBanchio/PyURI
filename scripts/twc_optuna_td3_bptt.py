@@ -11,11 +11,12 @@ import numpy as np
 import torch
 import optuna
 import optunahub
+import optuna_distributed
 from torch.utils.tensorboard import SummaryWriter
 from datetime import datetime
 from functools import partial
 from td3 import TD3Engine, TD3Config, td3_train
-from utils import ReplayBuffer, OUNoise
+from utils import ReplayBuffer, OUNoise, SequenceBuffer
 from mlp import Critic
 from twc import (
     build_twc,
@@ -33,30 +34,40 @@ def make_env(seed, env_id="MountainCarContinuous-v0"):
 def objective(trial: optuna.Trial, study_name):
     cfg = TD3Config()
     # --- Set Fixed Parameters ---
-    cfg.use_bptt = False 
+    cfg.use_bptt = True 
     cfg.max_episode = 300
     cfg.max_time_steps = 999
     cfg.warmup_steps = 10_000
     cfg.eval_interval_episodes = 10
     cfg.eval_episodes = 10
-    cfg.batch_size = 128
-    cfg.num_update_loops = 2
+    cfg.sequence_length = trial.suggest_int("sequence_length", 8, 12)
+    cfg.burn_in_length = trial.suggest_int("burn_in_length", 4, 6)
+    cfg.num_update_loops = trial.suggest_int("num_update_loops", 1, 2)
+    # Model arch params
+    cfg.batch_size = 256
+    cfg.policy_delay = trial.suggest_int("policy_delay", 2, 2)
+    
+    # Models Parameters
+    cfg.twc_internal_steps = 1
+    cfg.critic_hidden_layers = [400, 300]
+    cfg.twc_trhesholds = [-0.5, 0.0, 0.0]
+    cfg.twc_decays = [0.1, 0.1, 0.1]
+    cfg.rnd_init = True
+    # Replay Buffer
 
     # --- Set Tunable Hyperparameters ---
-    cfg.actor_lr = trial.suggest_float("actor_lr", 1e-5, 1e-3, log=True)
-    cfg.critic_lr = trial.suggest_float("critic_lr", 1e-4, 5e-3, log=True)
+    cfg.actor_lr = trial.suggest_float("actor_lr", 3e-5, 5e-4, log=True)
+    cfg.critic_lr = trial.suggest_float("critic_lr", 3e-4, 2e-3, log=True)
     cfg.gamma = trial.suggest_float("gamma", 0.98, 0.999)
-    cfg.tau = trial.suggest_float("tau", 0.001, 0.02, log=True)
-    cfg.policy_delay = trial.suggest_int("policy_delay", 1, 3)
+    cfg.tau = trial.suggest_float("tau", 0.002, 0.12, log=True)
     
-    # Noise params
-    cfg.target_noise = trial.suggest_float("target_noise", 0.1, 0.3)
-    cfg.noise_clip = trial.suggest_float("noise_clip", 0.3, 0.7)
-    cfg.sigma_start = trial.suggest_float("sigma_start", 0.1, 0.4)
-
-    # Model arch params
-    cfg.twc_internal_steps = trial.suggest_int("twc_internal_steps", 3, 3)
-    cfg.critic_hidden_layers = [400, 300]
+    # Target Noise params
+    cfg.target_noise = trial.suggest_float("target_noise", 0.1, 0.4)
+    cfg.noise_clip = trial.suggest_float("noise_clip", 0.2, 0.5)
+    # OUNoise params
+    cfg.sigma_start = trial.suggest_float("sigma_start", 0.25, 0.5)
+    cfg.sigma_end = trial.suggest_float("sigma_end", 0.02, 0.12)
+    cfg.sigma_decay_episodes = trial.suggest_int("sigma_decay_episodes", 175, 175)
 
     # Seed per trial
     seed = 42 + trial.number
@@ -71,6 +82,9 @@ def objective(trial: optuna.Trial, study_name):
         obs_encoder=mcc_obs_encoder,
         action_decoder=twc_out_2_mcc_action,
         internal_steps=cfg.twc_internal_steps,
+        initial_thresholds=cfg.twc_trhesholds,
+        initial_decays=cfg.twc_decays,
+        rnd_init=cfg.rnd_init,
         log_stats=False,
     )
     critic_1 = Critic(state_dim, action_dim, size=cfg.critic_hidden_layers)
@@ -99,12 +113,7 @@ def objective(trial: optuna.Trial, study_name):
         device=cfg.device,
     )
 
-    replay_buf = ReplayBuffer(
-        obs_dim=state_dim,
-        act_dim=action_dim,
-        size=cfg.replay_buffer_size,
-        keep=cfg.warmup_steps,
-    )
+    replay_buf = SequenceBuffer(capacity=cfg.replay_buffer_size)
 
     ou_noise = OUNoise(
         action_dimension=action_dim,
@@ -156,19 +165,17 @@ def objective(trial: optuna.Trial, study_name):
 
 def main():
     timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
-    study_name = f"twc_mcc_td3_optuna_{timestamp}"
+    study_name = f"twc_mcc_td3_bptt_optuna_{timestamp}"
     
     # Using TPE Sampler (common default) and MedianPruner
-    sampler = optuna.samplers.TPESampler()
     pruner = optuna.pruners.MedianPruner(
         n_startup_trials=5,  # Wait for 5 trials before pruning
         n_warmup_steps=30,   # Wait for 30 episodes (3 evals)
         interval_steps=10    # Prune every 10 episodes (1 eval)
     )
-    
     study = optuna.create_study(
         direction="maximize", 
-        sampler=sampler, 
+        sampler=optunahub.load_module("samplers/auto_sampler").AutoSampler(), 
         pruner=pruner,
         storage="sqlite:///db.sqlite3", # Save results to a DB
         study_name=study_name,
@@ -183,9 +190,9 @@ def main():
     try:
         study.optimize(
             obj_wrapper, 
-            n_trials=20, 
-            gc_after_trial=True, 
-            show_progress_bar=True
+            n_trials=20,
+            gc_after_trial=True,
+            show_progress_bar=True,
         )
     except KeyboardInterrupt:
         print("Optuna study interrupted by user.")

@@ -39,6 +39,7 @@ class SequenceBuffer:
             "reward": [],
             "next_obs": [],
             "done": [],
+            "truncated": [],
         }
 
     def store(self, obs: np.ndarray, action: np.ndarray, reward: float, next_obs: np.ndarray, done: bool, truncated: bool):
@@ -54,7 +55,8 @@ class SequenceBuffer:
         self.current_episode["reward"].append(np.array([reward])) # Store as (1,)
         self.current_episode["next_obs"].append(next_obs)
         self.current_episode["done"].append(np.array([done])) # Store as (1,)
-        
+        self.current_episode['truncated'].append(np.array([truncated])) # Store as (1,)
+
         # An episode ends if it's done (terminal) OR truncated (time limit)
         if done or truncated:
             self._flush_current_episode()

@@ -29,7 +29,7 @@
     { "src": "ALM", "dst": "PVC", "type": "IN", "weight": 0.5691776907737331 },
     { "src": "ALM", "dst": "AVD", "type": "IN", "weight": 0.06870484937279575 },
 
-    { "src": "DVA", "dst": "PVC", "type": "EX", "weight": 0.8932707852080584 },
+    { "src": "DVA", "dst": "PVC", "type": "IN", "weight": 0.8932707852080584 },
 
     { "src": "AVD", "dst": "AVA", "type": "EX", "weight": 0.847701574944238 },
     { "src": "AVD", "dst": "AVB", "type": "EX", "weight": 0.7070079202710381 },
