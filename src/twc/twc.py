@@ -88,12 +88,7 @@ class TWC (nn.Module):
         def _recurrent_step(self, 
                             x: torch.Tensor, 
                             state_in: dict[str, tuple[torch.Tensor, torch.Tensor]]
-                            ) -> tuple[torch.Tensor, dict[str, tuple[torch.Tensor, torch.Tensor]]]:
-            # This is the ENTIRE body of your old 'forward' method,
-            # but with two changes:
-            # 1. 'current_state' is 'state_in' (an argument)
-            # 2. 'self._state = state' becomes 'state_out = state' (a return value)
-            
+                            ) -> tuple[torch.Tensor, dict[str, tuple[torch.Tensor, torch.Tensor]]]:   
             device = next(self.parameters()).device
             if x.device != device:
                 x = x.to(device)
@@ -136,7 +131,6 @@ class TWC (nn.Module):
                 in2hid_gj_bundle = self.in2hid_GJ(in_out_for_connections)
                 
                 hid_out_old = current_state["hid"][1]
-                #hid_out_old = current_state["hid"][0]
                 
                 hid_ex_influence = self.hid_EX(hid_out_old)
                 hid_in_influence = self.hid_IN(hid_out_old)
@@ -154,7 +148,6 @@ class TWC (nn.Module):
                 hid_state_old = hid_state_new
 
             hid_out_old_final = current_state["hid"][1]
-            #hid_out_old_final = current_state["hid"][0]
             hid2out_ex_influence = self.hid2out(hid_out_old_final)
             
             out_state_cur = current_state["out"]
@@ -164,7 +157,6 @@ class TWC (nn.Module):
             )
             state_out["out"] = out_layer_state
             
-            # Decoder needs internal states (E), not output states (O)
             # Matching ariel's getFeedBackNN() which uses getInternalState()
             out_internal_states = out_layer_state[0]
             action = self.action_decoder(out_internal_states)
@@ -175,7 +167,6 @@ class TWC (nn.Module):
             """
             This is the STATEFUL method for ROLLOUT/EVALUATION.
             It uses and updates its internal self._state.
-            This is what 'get_action' should call.
             """
             device = next(self.parameters()).device
             if x.device != device:

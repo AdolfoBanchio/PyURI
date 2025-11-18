@@ -54,11 +54,6 @@ class FIURIModule(nn.Module):
         - Tn and dn are the neuronal parameters that have to be learned and represent:
             - Tn the firing threshold
             - dn the decay factor (due to not enough stimulus)
-    
-    Each neuron has 3 channels for communication with FIURI_connections
-        - 0: EX
-        - 1: IN
-        - 2: GJ
     """
     def __init__(
         self,
@@ -76,28 +71,21 @@ class FIURIModule(nn.Module):
         assert (num_cells is not None), "Must provide number of neurons per layer"      
         # save num of cells
         self.num_cells = num_cells
-        # --- learnable per-neuron parameters (shape: (n,))
-        # Create uninitialized parameters first
+
         self.threshold = nn.Parameter(torch.empty(num_cells), requires_grad=True) 
         self.decay     = nn.Parameter(torch.empty(num_cells), requires_grad=True)
         
         if rnd_init:
-            # Initialize threshold around the default 1.0, but with variance.
-            # A range from 0.5 to 1.5 is a sensible, strictly positive start.
+            # TODO: Check and define proper random init ranges
             nn.init.uniform_(self.threshold, -1.0, 2.0)
-            
-            # Initialize decay as a small positive number around the default 0.1.
-            # A range from 0.05 to 0.2 keeps it in a stable region.
             nn.init.uniform_(self.decay, 0.05, 1.0)
         else:
-            # --- Original Behavior ---
-            # Use nn.init.constant_ for clarity
             nn.init.constant_(self.threshold, initial_threshold)
             nn.init.constant_(self.decay, initial_decay)
         
         self._init_E = float(initial_in_state)
         self._init_O = float(initial_out_state)
-        # clamp range for S_n (optional)
+
         self.clamp_min = clamp_min
         self.clamp_max = clamp_max
 
@@ -114,7 +102,7 @@ class FIURIModule(nn.Module):
         Oj = o_pre[:, src]              # (B, E_gj)
         En = current_in_state[:, dst]   # (B, E_gj)
         
-        sgn = torch.sign(Oj - En)
+        sgn = torch.sign(Oj - En) # -1, 0, or 1
         #sgn = torch.where(Oj >= En, Oj.new_ones(Oj.shape), -Oj.new_ones(Oj.shape))
         contrib = Oj * w * sgn          # (B, E_gj)
 
@@ -152,16 +140,14 @@ class FIURIModule(nn.Module):
         
         if gj_bundle is not None:
             assert o_pre is not None, "o_pre must be provided when gj_bundle is not None"
-            # Pass current state to gap junction computation
             current_E_tensor = E if isinstance(E, torch.Tensor) else torch.full((B, self.num_cells), E, dtype=chem_influence.dtype, device=chem_influence.device)
             
             self._compute_gj_sum(
                 gj_bundle, 
                 o_pre, 
                 current_in_state=current_E_tensor, 
-                out_buffer=chem_influence
+                out_buffer=chem_influence # in-place modification
             )
-            # chem_influence is now (original chem_influence + gj_sum)
         
         # Note: E is still the *original* state[0]
         S = torch.clamp(E + chem_influence, self.clamp_min, self.clamp_max)
@@ -303,11 +289,11 @@ class FIURIModuleV2(nn.Module):
         self.input_thresh = input_thresh
         self.leaky_slope = leaky_slope
 
-        # --- learnable per-neuron parameters (shape: (n,))
         self.threshold = nn.Parameter(torch.empty(num_cells), requires_grad=True) 
         self.decay     = nn.Parameter(torch.empty(num_cells), requires_grad=True)
         
         if rnd_init:
+            # TODO: Check and define proper random init ranges
             nn.init.uniform_(self.threshold, -1.0, 2.0)
             nn.init.uniform_(self.decay, 0.05, 1.0)
         else:
@@ -316,7 +302,7 @@ class FIURIModuleV2(nn.Module):
         
         self._init_E = float(initial_in_state)
         self._init_O = float(initial_out_state)
-        # clamp range for S_n (optional)
+
         self.clamp_min = clamp_min
         self.clamp_max = clamp_max
 
@@ -333,7 +319,7 @@ class FIURIModuleV2(nn.Module):
         Oj = o_pre[:, src]              # (B, E_gj)
         En = current_in_state[:, dst]   # (B, E_gj)
         
-        sgn = torch.tanh(self.steepness_gj * (Oj - En)) # Soft sign
+        sgn = torch.tanh(self.steepness_gj * (Oj - En)) # Tanh is most used for smooth sign
         contrib = Oj * w * sgn          # (B, E_gj)
 
         # out buffer modified in-place
@@ -342,7 +328,6 @@ class FIURIModuleV2(nn.Module):
     def _calculate_new_state(self, S, E, T, D):
         """
         Calculates new (E, O) state from S, E, T, and D.
-        in a differentiable way.
         """
         # leaky relu allows some gradient flow when S < T
         new_o = F.leaky_relu(S - T, negative_slope=self.leaky_slope)
@@ -350,24 +335,21 @@ class FIURIModuleV2(nn.Module):
         # we force positive D trying to enforce training stability
         D_positive = F.softplus(D) 
         
-        # instead of hard conditions, we use smooth gates
-        # fire probability gate
+        # fire probability gate (0,1)
         fire_prob = torch.sigmoid(self.steepness_fire * (S - T))
         
         #  ~0 if S == E, y ~1 if S != E.
         diff = torch.abs(S - E)
         input_prob = torch.sigmoid(self.steepness_input * (diff - self.input_thresh))
         
-        # -3 output cases:
+        # output cases:
         E_fired = new_o          # 1: (S > T) -> E_next = O_next
         E_decay = E - D_positive # 2: (S == E) -> E_next = E - D. 
         E_subthresh = S          # 3: (S <= T y S != E) -> E_next = S.
 
-        # Use soft gates to combine cases:
         # E_nonfired = (if S != E: E_subthresh else: E_decay)
         E_nonfired = input_prob * E_subthresh + (1 - input_prob) * E_decay
         
-        # Combinar lógica "disparo" vs "no-disparo"
         # new_e = (if S > T: E_fired else: E_nonfired)
         new_e = fire_prob * E_fired + (1 - fire_prob) * E_nonfired
         
@@ -400,7 +382,6 @@ class FIURIModuleV2(nn.Module):
                 current_in_state=current_E_tensor, 
                 out_buffer=chem_influence
             )
-            # chem_influence is now (original chem_influence + gj_sum)
         
         # Note: E is still the *original* state[0]
         S = torch.clamp(E + chem_influence, self.clamp_min, self.clamp_max)

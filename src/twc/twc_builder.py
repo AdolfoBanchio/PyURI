@@ -17,7 +17,8 @@ def build_twc(obs_encoder: Callable,
               initial_decays: list[float] = [2.2, 0.1, 0.1],
               rnd_init: bool = False,
               use_V2: bool = False,
-              log_stats: bool = True) -> TWC:
+              log_stats: bool = True,
+              **kwargs) -> TWC:
     """ Extracts the data from thr TWC description
     and returns a nn.Module with the TWC implementation
     """
@@ -41,6 +42,7 @@ def build_twc(obs_encoder: Callable,
         clamp_min=-10.0,
         clamp_max=10.0,
         rnd_init=rnd_init,
+        **kwargs
     )
     hid_layer = Layer(
         num_cells=n_hid,
@@ -51,6 +53,7 @@ def build_twc(obs_encoder: Callable,
         clamp_min=-10.0,
         clamp_max=10.0,
         rnd_init=rnd_init,
+        **kwargs
     )
     out_layer = Layer(
         num_cells=n_out,
@@ -61,6 +64,7 @@ def build_twc(obs_encoder: Callable,
         clamp_min=-10.0,
         clamp_max=10.0,
         rnd_init=rnd_init,
+        **kwargs
     )
 
     in2hid = FiuriDenseConn(n_pre=n_in, n_post=n_hid,w_mask=masks["in2hid"]["IN"], type="IN")

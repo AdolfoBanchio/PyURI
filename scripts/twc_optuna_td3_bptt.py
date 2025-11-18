@@ -40,35 +40,44 @@ def objective(trial: optuna.Trial, study_name):
     cfg.warmup_steps = 10_000
     cfg.eval_interval_episodes = 10
     cfg.eval_episodes = 10
-    cfg.sequence_length = trial.suggest_int("sequence_length", 8, 12)
-    cfg.burn_in_length = trial.suggest_int("burn_in_length", 4, 6)
-    cfg.num_update_loops = trial.suggest_int("num_update_loops", 1, 2)
-    # Model arch params
+    cfg.policy_delay = 2
     cfg.batch_size = 256
-    cfg.policy_delay = trial.suggest_int("policy_delay", 2, 2)
     
     # Models Parameters
-    cfg.twc_internal_steps = 1
     cfg.critic_hidden_layers = [400, 300]
+    cfg.twc_internal_steps = 1
+    cfg.rnd_init = True
     cfg.twc_trhesholds = [-0.5, 0.0, 0.0]
     cfg.twc_decays = [0.1, 0.1, 0.1]
-    cfg.rnd_init = True
-    # Replay Buffer
-
-    # --- Set Tunable Hyperparameters ---
-    cfg.actor_lr = trial.suggest_float("actor_lr", 3e-5, 5e-4, log=True)
-    cfg.critic_lr = trial.suggest_float("critic_lr", 3e-4, 2e-3, log=True)
-    cfg.gamma = trial.suggest_float("gamma", 0.98, 0.999)
-    cfg.tau = trial.suggest_float("tau", 0.002, 0.12, log=True)
+    cfg.use_v2 = False
     
-    # Target Noise params
-    cfg.target_noise = trial.suggest_float("target_noise", 0.1, 0.4)
-    cfg.noise_clip = trial.suggest_float("noise_clip", 0.2, 0.5)
-    # OUNoise params
-    cfg.sigma_start = trial.suggest_float("sigma_start", 0.25, 0.5)
-    cfg.sigma_end = trial.suggest_float("sigma_end", 0.02, 0.12)
-    cfg.sigma_decay_episodes = trial.suggest_int("sigma_decay_episodes", 175, 175)
+    # --- Set Tunable Hyperparameters ---
+    cfg.sequence_length = trial.suggest_int("sequence_length", 8, 16)
+    max_burn_in = cfg.sequence_length - 2
+    cfg.burn_in_length = trial.suggest_int("burn_in_length", 4, max_burn_in)
+    cfg.num_update_loops = trial.suggest_int("num_update_loops", 1, 3)
+    
+    cfg.actor_lr = trial.suggest_float("actor_lr", 1e-5, 1e-3, log=True)
+    cfg.critic_lr = trial.suggest_float("critic_lr", 1e-4, 3e-3, log=True)
+    cfg.gamma = trial.suggest_float("gamma", 0.98, 0.999)
+    cfg.tau = trial.suggest_float("tau", 0.001, 0.02, log=True)
+    
+    cfg.target_noise = trial.suggest_float("target_noise", 0.1, 0.3)
+    cfg.noise_clip = trial.suggest_float("noise_clip", 0.3, 0.5)
+    # (OU)
+    cfg.sigma_start = trial.suggest_float("sigma_start", 0.2, 0.5)
+    cfg.sigma_end = trial.suggest_float("sigma_end", 0.01, 0.1)
+    cfg.sigma_decay_episodes = trial.suggest_int("sigma_decay_episodes", 150, 250)
 
+    # V2 twc hyperparameters
+    if cfg.use_v2:
+        v2_params = {
+            'steepness_fire': trial.suggest_float("steep_fire", 5.0, 25.0, log=True),
+            'steepness_gj': trial.suggest_float("steep_gj", 5.0, 25.0, log=True),
+            'steepness_input': trial.suggest_float("steep_input", 3.0, 20.0, log=True),
+            'input_thresh': trial.suggest_float("input_thresh", 1e-3, 5e-2, log=True),
+            'leaky_slope': trial.suggest_float("leaky_slope", 0.01, 0.2, log=True)
+            }
     # Seed per trial
     seed = 42 + trial.number
     np.random.seed(seed); torch.manual_seed(seed)
@@ -85,7 +94,9 @@ def objective(trial: optuna.Trial, study_name):
         initial_thresholds=cfg.twc_trhesholds,
         initial_decays=cfg.twc_decays,
         rnd_init=cfg.rnd_init,
+        use_V2=cfg.use_v2,
         log_stats=False,
+        **({'v2_params': v2_params} if cfg.use_v2 else {})
     )
     critic_1 = Critic(state_dim, action_dim, size=cfg.critic_hidden_layers)
     critic_2 = Critic(state_dim, action_dim, size=cfg.critic_hidden_layers)

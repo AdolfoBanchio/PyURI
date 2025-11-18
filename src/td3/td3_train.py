@@ -56,6 +56,7 @@ class TD3Config:
     twc_trhesholds: list[float] = (-0.5, 0.0, 0.0)
     twc_decays: list[float] = (2.2, 0.1, 0.1)
     rnd_init: bool = False
+    use_v2: bool = False
     critic_hidden_layers: list[int] = (128, 128)
     
     # Buffer
