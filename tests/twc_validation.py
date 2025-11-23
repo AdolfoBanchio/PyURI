@@ -422,6 +422,13 @@ def main():
     twc_v1.eval()
 
     print("Building TWC V2 (Differentiable)...")
+    v2_params = {
+        'steepness_fire': 1,
+        'steepness_gj': 1,
+        'steepness_input': 1,
+        'input_thresh': 0,
+        'leaky_slope': 0.2
+    }
     twc_v2 = build_twc(
         obs_encoder=mcc_obs_encoder,
         action_decoder=twc_out_2_mcc_action,
@@ -431,6 +438,7 @@ def main():
         rnd_init=True,
         use_V2=True, # <-- V2
         log_stats=True,
+        **{'v2_params': v2_params}
     )
     twc_v2.eval()
     

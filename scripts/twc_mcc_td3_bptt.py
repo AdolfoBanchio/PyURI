@@ -14,7 +14,7 @@ import optunahub
 from torch.utils.tensorboard import SummaryWriter
 from datetime import datetime
 from functools import partial
-from td3 import TD3Engine, TD3Config, td3_train
+from td3 import TD3Engine, TD3Config, td3_train, td3_train_by_steps
 from utils import ReplayBuffer, OUNoise, SequenceBuffer
 from mlp import Critic
 from twc import (
@@ -34,36 +34,52 @@ def main():
     cfg = TD3Config()
     # --- Set Fixed Parameters ---
     cfg.use_bptt = True 
-    cfg.max_episode = 300
-    cfg.max_time_steps = 999
+    cfg.max_episode = 500
+    cfg.max_train_steps = 500_000
+    cfg.max_time_steps_per_ep = 999
     cfg.warmup_steps = 10_000
+    cfg.replay_buffer_size = 100_000
     cfg.eval_interval_episodes = 10
     cfg.eval_episodes = 10
-    cfg.sequence_length = 10
+    cfg.policy_delay = 2
+    cfg.batch_size = 256
+    
+    # Models Parameters
+    cfg.critic_hidden_layers = [400, 300]
+    cfg.twc_internal_steps = 1
+    cfg.rnd_init = True
+    cfg.twc_trhesholds = [-0.5, 0.0, 0.0]
+    cfg.twc_decays = [0.1, 0.1, 0.1]
+    cfg.use_v2 = True
+    
+    # --- Set Tunable Hyperparameters ---
+    cfg.sequence_length = 8
     cfg.burn_in_length = 4
     cfg.num_update_loops = 2
-    # Model arch params
-    cfg.twc_internal_steps = 1
-    cfg.critic_hidden_layers = [400, 300]
-
-    # --- Set Tunable Hyperparameters ---
-    cfg.batch_size = 256
-    cfg.actor_lr = 0.0008
-    cfg.critic_lr = 0.0005
-    cfg.gamma = 0.9844956923106524
-    cfg.tau = 0.0040931345282959174
-    cfg.policy_delay = 2
     
-    # Noise params
-    cfg.target_noise = 0.2
-    cfg.noise_clip = 0.3599783289890277
-    cfg.sigma_start = 0.29976116138156494
-    cfg.sigma_end = 0.05
-    cfg.sigma_decay_episodes = 150.0
-    cfg.replay_buffer_size = 100_000
+    cfg.actor_lr = 0.0002239407231090426
+    cfg.critic_lr = 0.0001828306017572226
+    cfg.gamma = 0.9823522271023871
+    cfg.tau = 0.007693135327059323
+    cfg.target_noise = 0.28415959581368067
+    cfg.noise_clip = 0.31789035300173857
+    cfg.sigma_start = 0.39609107327435644
+    cfg.sigma_end = 0.08244881107627974
+    cfg.sigma_decay_episodes = 220
+
+    # V2 twc hyperparameters
+    if cfg.use_v2:
+        v2_params = {
+            'steepness_fire': 14.434533089746672,
+            'steepness_gj': 7.133187732282942,
+            'steepness_input': 4.984660808258514,
+            'input_thresh': 0.0012398039891235871,
+            'leaky_slope': 0.023101213993176297
+            }
     # Seed per trial
     seed = 42
-    np.random.seed(seed); torch.manual_seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
     env = make_env(seed)
 
     # Build models per trial to avoid cross-trial state leakage
@@ -74,7 +90,12 @@ def main():
         obs_encoder=mcc_obs_encoder,
         action_decoder=twc_out_2_mcc_action,
         internal_steps=cfg.twc_internal_steps,
+        initial_thresholds=cfg.twc_trhesholds,
+        initial_decays=cfg.twc_decays,
+        rnd_init=cfg.rnd_init,
+        use_V2=cfg.use_v2,
         log_stats=False,
+        **({'v2_params': v2_params} if cfg.use_v2 else {})
     )
     critic_1 = Critic(state_dim, action_dim, size=cfg.critic_hidden_layers)
     critic_2 = Critic(state_dim, action_dim, size=cfg.critic_hidden_layers)
@@ -115,7 +136,7 @@ def main():
 
     # --- Logging ---
     timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
-    run_name = f"twc_td3_bptt_{timestamp}"
+    run_name = f"twc_mcc_V{cfg.use_v2}_{timestamp}"
     log_dir = f'out/runs/td3/{run_name}'
     writer = SummaryWriter(log_dir)
 
@@ -133,11 +154,10 @@ def main():
             writer=writer,
             timestamp=timestamp,
             config=cfg,
-            trial=None
         )
-    
+
     # save final models
-    prefix = "td3_actor_final"
+    prefix = f"td3_actor_final_V{cfg.use_v2}"
     model_path = os.path.join(writer.log_dir, f"{prefix}_{timestamp}.pth")
     torch.save(engine.actor.state_dict(), model_path)
 

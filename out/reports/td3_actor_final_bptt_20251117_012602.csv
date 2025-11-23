@@ -1,2 +1,0 @@
-timestamp,model_name,model_path,env,episodes,mean_reward,std_reward,mean_steps,std_steps,min_steps,max_steps,best_reward,best_seed,video_path
-2025-11-17T11:12:30.566395,td3_actor_final_bptt_20251117_012602,out/runs/optuna/twc_mcc_td3_bptt_optuna_20251117_012558/trial_0_20251117_012602/td3_actor_final_bptt_20251117_012602.pth,MountainCarContinuous-v0,100,73.79574584960938,37.543636322021484,358.93,300.2708627391293,123,999,92.2036042267654,58,

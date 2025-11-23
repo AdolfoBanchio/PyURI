@@ -1,0 +1,14 @@
+{
+    "sequence_length": 9,
+    "burn_in_length": 5,
+    "num_update_loops": 3,
+    "actor_lr": 3.9390935488811857e-05,
+    "critic_lr": 0.00034408065011177455,
+    "gamma": 0.9904944523864395,
+    "tau": 0.002118289709836111,
+    "target_noise": 0.21742441879000213,
+    "noise_clip": 0.38838096639263303,
+    "sigma_start": 0.3702391664024297,
+    "sigma_end": 0.055993944357061176,
+    "sigma_decay_episodes": 174
+}
