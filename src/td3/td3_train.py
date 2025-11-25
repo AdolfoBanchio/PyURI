@@ -1,4 +1,5 @@
 import json
+import ast
 import numpy as np
 import os
 import torch
@@ -20,11 +21,13 @@ class TD3Config:
     # --- Training loop ---
     max_episode: int = 300
     max_train_steps: int = 300_000
-    max_time_steps_per_ep: int = 999
+    max_episode_steps: int = 999
     warmup_steps: int = 10_000
     batch_size: int = 128
     num_update_loops: int = 2 
+    update_every: int = 1
     device: torch.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    seed: int = 42
 
     # --- Evaluation ---
     eval_interval_episodes: int = 10
@@ -35,9 +38,6 @@ class TD3Config:
     sequence_length: Optional[int] = None
     burn_in_length: Optional[int] = None
 
-    # --- Saving ---
-    best_model_prefix: str = "td3_actor_best"
-    
     # --- Optuna-Tunable Hyperparameters (with defaults) ---
     actor_lr: float = 1e-4
     critic_lr: float = 1e-3
@@ -58,17 +58,47 @@ class TD3Config:
     twc_decays: list[float] = (2.2, 0.1, 0.1)
     rnd_init: bool = False
     use_v2: bool = False
+    steepness_fire: float = 14
+    steepness_gj: float = 7
+    steepness_input: float = 5
+    input_thresh: float = 0.001
+    leaky_slope: float = 0.02
     critic_hidden_layers: list[int] = (128, 128)
     
     # Buffer
     replay_buffer_size: int = 100_000
     replay_buffer_keep: int = 20_000 # For sequence buffer
 
+    # --- Saving ---
+    model_prefix: str = "td3_actor"
+    
     def to_json(self) -> str:
         d = asdict(self)
         d["device"] = str(self.device)
         d["critic_hidden_layers"] = str(self.critic_hidden_layers) # Convert tuple/list
         return json.dumps(d, indent=4)
+
+    def load(self, json_data):
+        data = json.loads(json_data) if isinstance(json_data, str) else dict(json_data)
+
+        # Normalize device
+        if "device" in data:
+            data["device"] = torch.device(data["device"])
+
+        # Parse critic layers that may have been serialized as a string
+        layers = data.get("critic_hidden_layers")
+        if isinstance(layers, str):
+            try:
+                layers = json.loads(layers)
+            except json.JSONDecodeError:
+                layers = ast.literal_eval(layers)
+        if isinstance(layers, (list, tuple)):
+            data["critic_hidden_layers"] = tuple(layers)
+
+        for field in self.__dataclass_fields__:
+            if field in data:
+                setattr(self, field, data[field])
+        return self
 
 
 def td3_train(
@@ -199,120 +229,115 @@ def td3_train_by_steps(
     best_ret = -np.inf
     e = 0  # Episode counter
 
+    # loop variables
+    env_seed = config.seed
+    max_train_steps = config.max_train_steps
+    warmup_steps =  config.warmup_steps
+    num_update_loops = config.num_update_loops
+    update_every_steps = config.update_every
+    use_bptt = config.use_bptt
+    batch_size = config.batch_size
+    sequence_length = config.sequence_length
+    device = config.device
+    burn_in_length = config.burn_in_length
+    eval_interval_episodes =  config.eval_interval_episodes
+    eval_episodes =  config.eval_episodes
+    model_prefix = config.model_prefix
+
     # Use tqdm to track total steps
     pbar = tqdm(total=config.max_train_steps, initial=total_steps, desc="Training TD3")
 
     # Main loop runs until total_steps reaches max_train_steps
-    while total_steps < config.max_train_steps:
+    while total_steps < max_train_steps:
         # --- Episode Start ---
-        obs, _ = env.reset()
+        obs, _ = env.reset(seed=env_seed)
+        env_seed += 1
         ou_noise.reset()
         ou_noise.update_sigma(e)
 
         ep_reward = 0.0
         ep_actions = []
         steps = 0
+
         if hasattr(engine.actor, 'reset'):
             engine.actor.reset()
             engine.actor_target.reset()
+        
+        done = False
 
-        # Inner loop runs until episode terminates or max steps per episode is reached
-        for t in range(config.max_time_steps_per_ep):
-            if total_steps >= config.max_train_steps:
-                # Break out of the inner loop if max steps is reached
+        while not done:
+            if total_steps >= max_train_steps:
                 break
-                
-            # --- Action Selection ---
-            if total_steps < config.warmup_steps:
-                action = env.action_space.sample()
-            else:
-                action = engine.get_action(obs, ou_noise.noise)
+            # Action Selection
+            if total_steps < warmup_steps: action = env.action_space.sample()
+            else: action = engine.get_action(obs, ou_noise.noise)
              
-            # --- Environment Step ---
+            # Environment step 
             obs2, reward, terminated, truncated, _ = env.step(action)
             done = terminated or truncated
             
             ep_reward += reward
             ep_actions.append(action[0])
             
-            # --- Store Transition and Update Step Counters ---
+            # Store transition and update step counters 
             replay_buf.store(obs, action, reward, obs2, terminated, truncated)
-            old_obs = obs # Not used in this snippet, but kept for consistency
             obs = obs2
             total_steps += 1
             steps += 1
-            pbar.update(1) # Update the tqdm progress bar
             
-            # --- Update Phase ---
-            if total_steps > config.warmup_steps:
-                for _ in range(config.num_update_loops):
-                    try:
-                        # Logic for BPTT or standard update remains the same
-                        if config.use_bptt:
-                            seq_batch = replay_buf.sample(
-                                config.batch_size, config.sequence_length, config.device
-                            )
-                            actor_loss, critic_loss = engine.update_step_bptt(
-                                seq_batch, config.burn_in_length
-                            )
-                        else:
-                            batch = replay_buf.sample(config.batch_size, config.device)
-                            actor_loss, critic_loss = engine.update_step(batch)
-
-                        # Log losses
-                        writer.add_scalar('Loss/Actor', actor_loss, total_steps)
-                        writer.add_scalar('Loss/Critic', critic_loss, total_steps)
+            # Update every X episodes 
+            if total_steps > warmup_steps and (total_steps % update_every_steps == 0):
+                for _ in range(num_update_loops):
+                    # Logic for BPTT or standard update remains the same
+                    if use_bptt:
+                        seq_batch = replay_buf.sample(batch_size, sequence_length, device)
+                        actor_loss, critic_loss = engine.update_step_bptt(seq_batch, burn_in_length)
+                    else:
+                        batch = replay_buf.sample(batch_size, device)
+                        actor_loss, critic_loss = engine.update_step(batch)
                     
-                    except ValueError as e:
-                        # Handle SequenceBuffer not being ready
-                        if config.use_bptt:
-                            pass
-                        else:
-                            raise e
-
-            if done:
-                break
+                    # Log losses
+                    writer.add_scalar('Loss/Actor', actor_loss, total_steps)
+                    writer.add_scalar('Loss/Critic', critic_loss, total_steps)
         
-        # --- End of Episode (if it completed) ---
-        if total_steps <= config.max_train_steps:
+        pbar.update(steps) # Update the tqdm progress bar
+        if done:
+            # Current ep ended, log middle trainig results
             writer.add_scalar('Training/Episode_Return', ep_reward, total_steps)
             writer.add_scalar('Training/Episode_steps', steps, total_steps)
             if len(ep_actions) > 0:
-                writer.add_scalar('Training/AvgAction', float(np.mean(ep_actions)), e)
-                writer.add_scalar('Training/StdAction', float(np.std(ep_actions)), e)
-
-            # --- Periodic Evaluation & Optuna Pruning ---
-            if (e + 1) % config.eval_interval_episodes == 0:
-                eval_ret, eval_avg_action = engine.evaluate_policy(env, episodes=config.eval_episodes)
+                writer.add_scalar('Training/AvgAction', float(np.mean(ep_actions)), total_steps)
+                writer.add_scalar('Training/StdAction', float(np.std(ep_actions)), total_steps)
+            
+            e += 1
+            # Evaluation & Optuna Pruning
+            if e % eval_interval_episodes == 0:
+                eval_ret, eval_avg_action = engine.evaluate_policy(env, episodes=eval_episodes)
                 writer.add_scalar('Evaluation/Return', eval_ret, total_steps)
                 writer.add_scalar('Evaluation/AvgAction', eval_avg_action, total_steps)
             
-                print(f"\nEpisode {e+1}: TotalSteps: {total_steps}, EvalReturn: {eval_ret:.2f}")
-
+                tqdm.write(f"\nEpisode {e}: TotalSteps: {total_steps}, EvalReturn: {eval_ret:.2f}")
                 if eval_ret > best_ret:
                     best_ret = eval_ret
-                    prefix = config.best_model_prefix
+                    prefix = model_prefix
                     model_path = os.path.join(writer.log_dir, f"{prefix}_best_{timestamp}.pth")
                     torch.save(engine.actor.state_dict(), model_path)
-                    print(f"New best evaluation reward: {best_ret:.2f}. Model saved to {model_path}")
+                    tqdm.write(f"New best evaluation reward: {best_ret:.2f}. Model saved to {model_path}")
                 
                 # --- OPTUNA PRUNING LOGIC ---
                 if trial is not None:
                     # Report using the episode count for Optuna, but use total_steps for logging
-                    trial.report(eval_ret, e + 1) 
+                    trial.report(eval_ret, e) 
                     if trial.should_prune():
-                        print(f"Trial {trial.number} pruned at episode {e+1} with return {eval_ret}.")
+                        tqdm.write(f"Trial {trial.number} pruned at episode {e} with return {eval_ret}.")
                         # Close the progress bar before raising exception
                         pbar.close() 
                         raise optuna.TrialPruned()
-            
-            # Increment episode counter
-            e += 1
 
     pbar.close()
     
     # --- Final Save ---
-    prefix = "td3_actor_final_bptt" if config.use_bptt else "td3_actor_final"
+    prefix = model_prefix + "_final_bptt" if use_bptt else model_prefix + "_final"
     model_path = os.path.join(writer.log_dir, f"{prefix}_{timestamp}.pth")            
     torch.save(engine.actor.state_dict(), model_path)
     print(f"Final Model saved to {model_path}")           

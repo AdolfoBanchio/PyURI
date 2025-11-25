@@ -34,8 +34,7 @@ def main():
     cfg = TD3Config()
     # --- Set Fixed Parameters ---
     cfg.use_bptt = True 
-    cfg.max_episode = 500
-    cfg.max_train_steps = 500_000
+    cfg.max_train_steps = 300_000
     cfg.max_time_steps_per_ep = 999
     cfg.warmup_steps = 10_000
     cfg.replay_buffer_size = 100_000
@@ -56,7 +55,7 @@ def main():
     cfg.sequence_length = 8
     cfg.burn_in_length = 4
     cfg.num_update_loops = 2
-    
+    cfg.update_every = 1 # update every timestep
     cfg.actor_lr = 0.0002239407231090426
     cfg.critic_lr = 0.0001828306017572226
     cfg.gamma = 0.9823522271023871
@@ -67,21 +66,31 @@ def main():
     cfg.sigma_end = 0.08244881107627974
     cfg.sigma_decay_episodes = 220
 
+    cfg.model_prefix = "twc_td3_actor"
+
+    cfg.steepness_fire =  14.434533089746672 
+    cfg.steepness_gj =  7.133187732282942
+    cfg.steepness_input =  4.984660808258514
+    cfg.input_thresh = 0.0012398039891235871
+    cfg.leaky_slope = 0.023101213993176297
+    
     # V2 twc hyperparameters
     if cfg.use_v2:
         v2_params = {
-            'steepness_fire': 14.434533089746672,
-            'steepness_gj': 7.133187732282942,
-            'steepness_input': 4.984660808258514,
-            'input_thresh': 0.0012398039891235871,
-            'leaky_slope': 0.023101213993176297
+            'steepness_fire': cfg.steepness_fire,
+            'steepness_gj': cfg.steepness_gj,
+            'steepness_input': cfg.steepness_input,
+            'input_thresh': cfg.input_thresh,
+            'leaky_slope': cfg.leaky_slope
             }
     # Seed per trial
     seed = 42
     np.random.seed(seed)
     torch.manual_seed(seed)
     env = make_env(seed)
-
+    
+    cfg.seed = seed
+    
     # Build models per trial to avoid cross-trial state leakage
     state_dim = env.observation_space.shape[0]
     action_dim = env.action_space.shape[0]
@@ -146,7 +155,7 @@ def main():
     with open(config_path, "w") as f:
         f.write(cfg.to_json())
 
-    td3_train(
+    td3_train_by_steps(
             env=env,
             replay_buf=replay_buf,
             ou_noise=ou_noise,
