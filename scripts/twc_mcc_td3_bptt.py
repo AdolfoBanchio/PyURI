@@ -11,6 +11,7 @@ import numpy as np
 import torch
 import optuna
 import optunahub
+import argparse
 from torch.utils.tensorboard import SummaryWriter
 from datetime import datetime
 from functools import partial
@@ -30,50 +31,15 @@ def make_env(seed, env_id="MountainCarContinuous-v0"):
     env.action_space.seed(seed)
     return env
 
-def main():
-    cfg = TD3Config()
-    # --- Set Fixed Parameters ---
-    cfg.use_bptt = True 
-    cfg.max_train_steps = 300_000
-    cfg.max_time_steps_per_ep = 999
-    cfg.warmup_steps = 10_000
-    cfg.replay_buffer_size = 100_000
-    cfg.eval_interval_episodes = 10
-    cfg.eval_episodes = 10
-    cfg.policy_delay = 2
-    cfg.batch_size = 256
-    
-    # Models Parameters
-    cfg.critic_hidden_layers = [400, 300]
-    cfg.twc_internal_steps = 1
-    cfg.rnd_init = True
-    cfg.twc_trhesholds = [-0.5, 0.0, 0.0]
-    cfg.twc_decays = [0.1, 0.1, 0.1]
-    cfg.use_v2 = True
-    
-    # --- Set Tunable Hyperparameters ---
-    cfg.sequence_length = 8
-    cfg.burn_in_length = 4
-    cfg.num_update_loops = 2
-    cfg.update_every = 1 # update every timestep
-    cfg.actor_lr = 0.0002239407231090426
-    cfg.critic_lr = 0.0001828306017572226
-    cfg.gamma = 0.9823522271023871
-    cfg.tau = 0.007693135327059323
-    cfg.target_noise = 0.28415959581368067
-    cfg.noise_clip = 0.31789035300173857
-    cfg.sigma_start = 0.39609107327435644
-    cfg.sigma_end = 0.08244881107627974
-    cfg.sigma_decay_episodes = 220
+def parse_args():
+    parser = argparse.ArgumentParser(
+        description="Train a MCC agent using TD3 and TWC architecture"
+    )
+    parser.add_argument("config_path", type=str, help="Path to the TD3 Config json")
 
-    cfg.model_prefix = "twc_td3_actor"
+    return parser.parse_args()
 
-    cfg.steepness_fire =  14.434533089746672 
-    cfg.steepness_gj =  7.133187732282942
-    cfg.steepness_input =  4.984660808258514
-    cfg.input_thresh = 0.0012398039891235871
-    cfg.leaky_slope = 0.023101213993176297
-    
+def main(cfg: TD3Config):
     # V2 twc hyperparameters
     if cfg.use_v2:
         v2_params = {
@@ -84,12 +50,10 @@ def main():
             'leaky_slope': cfg.leaky_slope
             }
     # Seed per trial
-    seed = 42
+    seed = cfg.seed
     np.random.seed(seed)
     torch.manual_seed(seed)
     env = make_env(seed)
-    
-    cfg.seed = seed
     
     # Build models per trial to avoid cross-trial state leakage
     state_dim = env.observation_space.shape[0]
@@ -171,4 +135,14 @@ def main():
     torch.save(engine.actor.state_dict(), model_path)
 
 if __name__ == "__main__":
-    main()
+    args = parse_args()
+    config_path = Path(args.config_path)
+    print(config_path)
+    cfg = TD3Config()
+    if config_path.exists:
+        with open(config_path, 'r') as f:
+            config_data =  json.load(f)
+        cfg = cfg.load(config_data)
+
+    print(cfg)
+    main(cfg)

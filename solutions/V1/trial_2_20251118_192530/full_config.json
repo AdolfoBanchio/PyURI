@@ -1,16 +1,18 @@
 {
     "max_episode": 300,
-    "max_time_steps": 999,
+    "max_train_steps": 300000,
+    "max_episode_steps": 999,
     "warmup_steps": 10000,
     "batch_size": 256,
     "num_update_loops": 3,
+    "update_every": 1,
     "device": "cuda",
+    "seed": 42,
     "eval_interval_episodes": 10,
     "eval_episodes": 10,
     "use_bptt": true,
     "sequence_length": 9,
     "burn_in_length": 5,
-    "best_model_prefix": "td3_actor_best",
     "actor_lr": 3.9390935488811857e-05,
     "critic_lr": 0.00034408065011177455,
     "gamma": 0.9904944523864395,
@@ -36,5 +38,6 @@
     "use_v2": false,
     "critic_hidden_layers": "[400, 300]",
     "replay_buffer_size": 100000,
-    "replay_buffer_keep": 20000
+    "replay_buffer_keep": 20000,
+    "model_prefix": "twc_V1_td3_actor"
 }
