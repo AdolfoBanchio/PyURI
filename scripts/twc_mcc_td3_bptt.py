@@ -15,7 +15,7 @@ import argparse
 from torch.utils.tensorboard import SummaryWriter
 from datetime import datetime
 from functools import partial
-from td3 import TD3Engine, TD3Config, td3_train, td3_train_by_steps
+from td3 import TD3Engine, TD3Config, td3_train
 from utils import ReplayBuffer, OUNoise, SequenceBuffer
 from mlp import Critic
 from twc import (
@@ -119,7 +119,7 @@ def main(cfg: TD3Config):
     with open(config_path, "w") as f:
         f.write(cfg.to_json())
 
-    td3_train_by_steps(
+    td3_train(
             env=env,
             replay_buf=replay_buf,
             ou_noise=ou_noise,

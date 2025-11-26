@@ -34,53 +34,70 @@ def make_env(seed, env_id="MountainCarContinuous-v0"):
 def objective(trial: optuna.Trial, study_name):
     cfg = TD3Config()
     # --- Set Fixed Parameters ---
-    cfg.use_bptt = True 
-    cfg.max_episode = 300
+    cfg.max_train_steps = 300_000
     cfg.max_time_steps = 999
     cfg.warmup_steps = 10_000
     cfg.eval_interval_episodes = 10
     cfg.eval_episodes = 10
-    cfg.policy_delay = 2
-    cfg.batch_size = 256
     
-    # Models Parameters
+    # Models fixed params
     cfg.critic_hidden_layers = [400, 300]
     cfg.twc_internal_steps = 1
     cfg.rnd_init = True
-    cfg.twc_trhesholds = [-0.5, 0.0, 0.0]
-    cfg.twc_decays = [0.1, 0.1, 0.1]
-    cfg.use_v2 = False
+    cfg.use_v2 = True
     
-    # --- Set Tunable Hyperparameters ---
-    cfg.sequence_length = trial.suggest_int("sequence_length", 8, 16)
-    max_burn_in = cfg.sequence_length - 2
-    cfg.burn_in_length = trial.suggest_int("burn_in_length", 4, max_burn_in)
-    cfg.num_update_loops = trial.suggest_int("num_update_loops", 1, 3)
+    # BPTT related
+    cfg.use_bptt = True 
+    cfg.sequence_length = 8
+    cfg.burn_in_length = 4    
+    cfg.batch_size = 256
     
-    cfg.actor_lr = trial.suggest_float("actor_lr", 1e-5, 1e-3, log=True)
-    cfg.critic_lr = trial.suggest_float("critic_lr", 1e-4, 3e-3, log=True)
-    cfg.gamma = trial.suggest_float("gamma", 0.98, 0.999)
-    cfg.tau = trial.suggest_float("tau", 0.001, 0.02, log=True)
-    
-    cfg.target_noise = trial.suggest_float("target_noise", 0.1, 0.3)
-    cfg.noise_clip = trial.suggest_float("noise_clip", 0.3, 0.5)
-    # (OU)
-    cfg.sigma_start = trial.suggest_float("sigma_start", 0.2, 0.5)
-    cfg.sigma_end = trial.suggest_float("sigma_end", 0.01, 0.1)
-    cfg.sigma_decay_episodes = trial.suggest_int("sigma_decay_episodes", 150, 250)
+    # TD3 Fixed params
+    cfg.num_update_loops = 2 
+    cfg.policy_delay = 2 # , policy is updated every 2 update steps
+    cfg.gamma = 0.982
+    cfg.tau = 0.008
+    cfg.target_noise = 0.28 
+    cfg.noise_clip = 0.32
+    # These fixed values are extracted from trial 0 of first Optuna iteration. (only succesfull from 20)
 
-    # V2 twc hyperparameters
+    # --- Set Tunable Hyperparameters ---
+    cfg.actor_lr = trial.suggest_float("actor_lr", 1.5e-4, 3.0e-4, log=True)
+    cfg.critic_lr = trial.suggest_float("critic_lr", 1.0e-4, 2.5e-4, log=True)
+    
+    # (OU) 
+    cfg.sigma_start = trial.suggest_float("sigma_start", 0.35, 0.45)
+    cfg.sigma_end = 0.08
+    cfg.sigma_decay_episodes = trial.suggest_int("sigma_decay_episodes", 200, 250)
+
+    # Surrogate gradients TWC hyperparameters
+    # Trial 0: 14.43 -> Rango [12, 16]
+    cfg.steepness_fire = trial.suggest_float("steep_fire", 12.0, 16.0)
+    # Trial 0: 7.13 -> Rango [6, 9]
+    cfg.steepness_gj = trial.suggest_float("steep_gj", 6.0, 9.0)
+    # Trial 0: 4.98 -> Rango [4, 6]
+    cfg.steepness_input = trial.suggest_float("steep_input", 4.0, 6.0)
+    # Trial 0: 0.0012 -> Rango [0.0008, 0.002]
+    cfg.input_thresh = trial.suggest_float("input_thresh", 8e-4, 2e-3, log=True)
+    # Trial 0: 0.023 -> Rango [0.015, 0.035]
+    cfg.leaky_slope = trial.suggest_float("leaky_slope", 0.015, 0.035)
+
+    v2_params = {}
     if cfg.use_v2:
         v2_params = {
-            'steepness_fire': trial.suggest_float("steep_fire", 5.0, 25.0, log=True),
-            'steepness_gj': trial.suggest_float("steep_gj", 5.0, 25.0, log=True),
-            'steepness_input': trial.suggest_float("steep_input", 3.0, 20.0, log=True),
-            'input_thresh': trial.suggest_float("input_thresh", 1e-3, 5e-2, log=True),
-            'leaky_slope': trial.suggest_float("leaky_slope", 0.01, 0.2, log=True)
+            'steepness_fire': cfg.steepness_fire,
+            'steepness_gj': cfg.steepness_gj,
+            'steepness_input': cfg.steepness_input,
+            'input_thresh': cfg.input_thresh,
+            'leaky_slope': cfg.leaky_slope,
             }
+        
     # Seed per trial
     seed = 42 + trial.number
-    np.random.seed(seed); torch.manual_seed(seed)
+    cfg.seed = seed
+    
+    np.random.seed(seed)
+    torch.manual_seed(seed)
     env = make_env(seed)
 
     # Build models per trial to avoid cross-trial state leakage
@@ -96,13 +113,18 @@ def objective(trial: optuna.Trial, study_name):
         rnd_init=cfg.rnd_init,
         use_V2=cfg.use_v2,
         log_stats=False,
-        **({'v2_params': v2_params} if cfg.use_v2 else {})
+        **v2_params
     )
+    
+    print(f"Actor of trial {trial.number}: ")
+    print(actor.state_dict())
+    
     critic_1 = Critic(state_dim, action_dim, size=cfg.critic_hidden_layers)
     critic_2 = Critic(state_dim, action_dim, size=cfg.critic_hidden_layers)
 
     # Optimizers
     actor_opt = torch.optim.Adam(actor.parameters(),  lr=cfg.actor_lr)
+
     critic_opt = torch.optim.Adam(
         itertools.chain(critic_1.parameters(), critic_2.parameters()),
         lr=cfg.critic_lr,
@@ -180,8 +202,8 @@ def main():
     
     # Using TPE Sampler (common default) and MedianPruner
     pruner = optuna.pruners.MedianPruner(
-        n_startup_trials=5,  # Wait for 5 trials before pruning
-        n_warmup_steps=30,   # Wait for 30 episodes (3 evals)
+        n_startup_trials=4,  # Wait for 5 trials before pruning
+        n_warmup_steps=25,   # Wait for 30 episodes (3 evals)
         interval_steps=10    # Prune every 10 episodes (1 eval)
     )
     study = optuna.create_study(

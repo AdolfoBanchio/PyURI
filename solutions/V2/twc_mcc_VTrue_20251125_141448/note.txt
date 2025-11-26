@@ -1,0 +1,2 @@
+This attempt endedup failing and convergin to a negative solution. 
+But the model saved corresponds to the first 70k steps, where te actor was learning.
