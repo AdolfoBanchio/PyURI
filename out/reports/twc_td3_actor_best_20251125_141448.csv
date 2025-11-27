@@ -1,2 +1,0 @@
-timestamp,model_name,model_path,env,episodes,mean_reward,std_reward,mean_steps,std_steps,min_steps,max_steps,best_reward,best_seed,video_path
-2025-11-26T00:01:06.890062+00:00,twc_td3_actor_best_20251125_141448,out/runs/td3/twc_mcc_VTrue_20251125_141448/twc_td3_actor_best_20251125_141448.pth,MountainCarContinuous-v0,100,90.4006118774414,2.4616105556488037,152.78,29.653412088406427,118,277,93.16099003378567,85,out/videos/twc_td3_actor_best_20251125_141448_best-episode-0.mp4

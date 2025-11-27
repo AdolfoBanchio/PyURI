@@ -41,13 +41,14 @@ def parse_args():
 
 def main(cfg: TD3Config):
     # V2 twc hyperparameters
+    v2_params = {}
     if cfg.use_v2:
         v2_params = {
             'steepness_fire': cfg.steepness_fire,
             'steepness_gj': cfg.steepness_gj,
             'steepness_input': cfg.steepness_input,
             'input_thresh': cfg.input_thresh,
-            'leaky_slope': cfg.leaky_slope
+            'leaky_slope': cfg.leaky_slope,
             }
     # Seed per trial
     seed = cfg.seed
@@ -68,7 +69,7 @@ def main(cfg: TD3Config):
         rnd_init=cfg.rnd_init,
         use_V2=cfg.use_v2,
         log_stats=False,
-        **({'v2_params': v2_params} if cfg.use_v2 else {})
+        **v2_params
     )
     critic_1 = Critic(state_dim, action_dim, size=cfg.critic_hidden_layers)
     critic_2 = Critic(state_dim, action_dim, size=cfg.critic_hidden_layers)
@@ -118,7 +119,8 @@ def main(cfg: TD3Config):
     config_path = os.path.join(log_dir, "full_config.json")
     with open(config_path, "w") as f:
         f.write(cfg.to_json())
-
+    
+    # Trains, saves best and final models. 
     td3_train(
             env=env,
             replay_buf=replay_buf,
@@ -129,10 +131,6 @@ def main(cfg: TD3Config):
             config=cfg,
         )
 
-    # save final models
-    prefix = f"td3_actor_final_V{cfg.use_v2}"
-    model_path = os.path.join(writer.log_dir, f"{prefix}_{timestamp}.pth")
-    torch.save(engine.actor.state_dict(), model_path)
 
 if __name__ == "__main__":
     args = parse_args()

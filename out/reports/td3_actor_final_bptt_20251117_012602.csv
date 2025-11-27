@@ -1,2 +1,0 @@
-timestamp,model_name,model_path,env,episodes,mean_reward,std_reward,mean_steps,std_steps,min_steps,max_steps,best_reward,best_seed,video_path
-2025-11-25T23:43:53.925711+00:00,td3_actor_final_bptt_20251117_012602,solutions/V2/trial_0_20251117_012602/td3_actor_final_bptt_20251117_012602.pth,MountainCarContinuous-v0,100,83.86988067626953,28.586877822875977,263.35,242.03849660412254,118,999,93.65075848537242,83,out/videos/td3_actor_final_bptt_20251117_012602_best-episode-0.mp4

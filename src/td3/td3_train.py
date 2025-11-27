@@ -158,8 +158,10 @@ def td3_train(
             if total_steps >= max_train_steps:
                 break
             # Action Selection
-            if total_steps < warmup_steps: action = env.action_space.sample()
-            else: action = engine.get_action(obs, ou_noise.noise)
+            if total_steps < warmup_steps: 
+                action = env.action_space.sample()
+            else: 
+                action = engine.get_action(obs, ou_noise.noise)
              
             # Environment step 
             obs2, reward, terminated, truncated, _ = env.step(action)
@@ -219,7 +221,7 @@ def td3_train(
                 # --- OPTUNA PRUNING LOGIC ---
                 if trial is not None:
                     # Report using the episode count for Optuna, but use total_steps for logging
-                    trial.report(eval_ret, e) 
+                    trial.report(eval_ret, total_steps) 
                     if trial.should_prune():
                         tqdm.write(f"Trial {trial.number} pruned at episode {e} with return {eval_ret}.")
                         pbar.close() 

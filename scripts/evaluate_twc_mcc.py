@@ -29,6 +29,7 @@ DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 REPORTS_DIR = "out/reports"
 VIDEOS_DIR = "out/videos"
 
+REPORTS_FILEPATH = "out/reports/twc_td3_reports.csv"
 
 def parse_config(cfg: TD3Config, model_path: Path):
     v2_params = {}
@@ -151,16 +152,16 @@ def record_episode(
 def write_report(
     metrics: dict,
     model_path: Path,
-    reports_dir: Path,
+    reports_filepath: Path,
+    config: TD3Config,
     video_path: Optional[str],
 ):
-    """Persist evaluation summary to CSV named after the model checkpoint."""
-    reports_dir.mkdir(parents=True, exist_ok=True)
     model_name = model_path.stem
-    report_path = reports_dir / f"{model_name}.csv"
+    reports_filepath.parent.mkdir(parents=True, exist_ok=True)
 
     fields = [
         "timestamp",
+        "version",
         "model_name",
         "model_path",
         "env",
@@ -175,8 +176,10 @@ def write_report(
         "best_seed",
         "video_path",
     ]
+
     row = {
         "timestamp": datetime.now(timezone.utc).isoformat(),
+        "version": "V2" if config.use_v2 else "V1",
         "model_name": model_name,
         "model_path": str(model_path),
         "env": ENV,
@@ -192,12 +195,24 @@ def write_report(
         "video_path": video_path or "",
     }
 
-    with report_path.open("w", newline="") as csvfile:
+    existing_models = set()
+    if reports_filepath.exists():
+        with reports_filepath.open("r", newline="") as csvfile:
+            reader = csv.DictReader(csvfile)
+            for existing_row in reader:
+                existing_models.add(existing_row.get("model_path") or existing_row.get("model_name"))
+
+    if str(model_path) in existing_models or model_name in existing_models:
+        return reports_filepath
+
+    write_header = not reports_filepath.exists() or reports_filepath.stat().st_size == 0
+    with reports_filepath.open("a", newline="") as csvfile:
         writer = csv.DictWriter(csvfile, fieldnames=fields)
-        writer.writeheader()
+        if write_header:
+            writer.writeheader()
         writer.writerow(row)
 
-    return report_path
+    return reports_filepath
 
 def save_twc_plots(twc, out_dir="out/videos"):
     # Extract monitor logs into (T, N) tensors per layer
@@ -249,7 +264,7 @@ def parse_args():
 
 def main():
     args = parse_args()
-    reports_dir = Path(REPORTS_DIR)
+    reports_dir = Path(REPORTS_FILEPATH)
     videos_dir = Path(VIDEOS_DIR)
     model_path = Path(args.model_path)
     config_path = Path(args.config)
@@ -277,7 +292,7 @@ def main():
     #if "twc" in model_path.name.lower():
     #    save_twc_plots(twc=actor, out_dir=videos_dir)
 
-    report_path = write_report(metrics, model_path, reports_dir, video_path)
+    report_path = write_report(metrics, model_path, reports_dir, cfg, video_path)
 
     print(
         f"Evaluation finished over {metrics['episodes']} episodes. "
