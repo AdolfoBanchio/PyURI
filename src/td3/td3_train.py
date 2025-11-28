@@ -14,6 +14,7 @@ from .td3_engine import TD3Engine
 from utils.replay_buffer import ReplayBuffer
 from utils.sequence_buffer import SequenceBuffer
 from utils.ou_noise import OUNoise
+from utils.PER_seq_buffer import PrioritizedSequenceReplayBuffer
 
 
 @dataclass
@@ -46,10 +47,8 @@ class TD3Config:
     target_noise: float = 0.2
     noise_clip: float = 0.5
     
-    # Exploration noise (OU)
-    sigma_start: float = 0.20
-    sigma_end: float = 0.05
-    sigma_decay_episodes: int = 125
+    # Exploration noise Normal Gaussian (0, sigma)
+    exp_noise: float = 0.1 # most common fixed std in TD3 algorithms
 
     # Model-specific (TWC and Critic)
     twc_internal_steps: int = 3
@@ -105,12 +104,13 @@ class TD3Config:
 def td3_train(
     env: gym.Env,
     replay_buf: ReplayBuffer,
-    ou_noise: OUNoise,
     engine: TD3Engine,
     writer: SummaryWriter,
     timestamp: str,
     config: TD3Config,
-    trial: optuna.Trial = None
+    trial: optuna.Trial = None,
+    OUNoise: OUNoise = None,
+    use_PER: bool = None,
 ):
     """
     Main training loop for TD3, adapted to run for a maximum number of time steps.
@@ -133,6 +133,9 @@ def td3_train(
     eval_interval_episodes =  config.eval_interval_episodes
     eval_episodes =  config.eval_episodes
     model_prefix = config.model_prefix
+    exp_noise = config.exp_noise
+    action_low  = torch.as_tensor(engine.act_space.low,  device=engine.device, dtype=torch.float32)
+    action_high = torch.as_tensor(engine.act_space.high, device=engine.device, dtype=torch.float32)
 
     # Use tqdm to track total steps
     pbar = tqdm(total=config.max_train_steps, initial=total_steps, desc="Training TD3")
@@ -140,13 +143,12 @@ def td3_train(
     while total_steps < max_train_steps:
         # New episode
         obs, _ = env.reset(seed=env_seed)
-        # env_seed += 1 for now avoid modifying seed during trainig for reproducibility
-        ou_noise.reset()
-        ou_noise.update_sigma(e)
-
         ep_reward = 0.0
         ep_actions = []
         steps = 0
+
+        if OUNoise:
+            OUNoise.reset()
 
         if hasattr(engine.actor, 'reset'):
             engine.actor.reset()
@@ -161,8 +163,24 @@ def td3_train(
             if total_steps < warmup_steps: 
                 action = env.action_space.sample()
             else: 
-                action = engine.get_action(obs, ou_noise.noise)
-             
+                """  
+                this get action, makes a forward pass where the actor maintain his own state
+                through all the active training episode. In the update step network intenrla state
+                is managed differntly to avoid intervinig in the state of the network during
+                the active episode. 
+                """
+                a_det = engine.get_action(obs)
+                
+                if not OUNoise:
+                    noise = torch.randn_like(a_det) * exp_noise
+                else:
+                    OUNoise.update(total_steps=total_steps)
+                    noise = torch.as_tensor(OUNoise.noise(), 
+                                            device=a_det.device,
+                                            dtype=a_det.dtype)
+
+                action = torch.clamp(a_det + noise, action_low, action_high).detach().cpu().numpy()
+
             # Environment step 
             obs2, reward, terminated, truncated, _ = env.step(action)
             done = terminated or truncated
@@ -181,16 +199,23 @@ def td3_train(
                 for _ in range(num_update_loops):
                     # Logic for BPTT or standard update remains the same
                     if use_bptt:
-                        seq_batch = replay_buf.sample(batch_size, sequence_length, device)
-                        actor_loss, critic_loss = engine.update_step_bptt(seq_batch, burn_in_length)
+                        if use_PER:
+                            seq_batch, is_weights, idxs = replay_buf.sample(batch_size, sequence_length, device)
+                            actor_loss, critic_loss, td_errors = engine.update_step_bptt(seq_batch, burn_in_length, is_weights)
+                            replay_buf.update_priorities(idxs, td_errors)
+                        else:
+                            seq_batch = replay_buf.sample(batch_size, sequence_length, device)
+                            actor_loss, critic_loss, _ = engine.update_step_bptt(seq_batch, burn_in_length)
                     else:
                         batch = replay_buf.sample(batch_size, device)
                         actor_loss, critic_loss = engine.update_step(batch)
                     
-                    # Log losses every 100 steps to avoid exessive IO
-                    if total_steps % 100 == 0:
-                        writer.add_scalar('Loss/Actor', actor_loss, total_steps)
-                        writer.add_scalar('Loss/Critic', critic_loss, total_steps)
+                # Log losses every 100 steps to avoid exessive IO
+                if total_steps % 100 == 0:
+                    writer.add_scalar('Loss/Actor', actor_loss, total_steps)
+                    writer.add_scalar('Loss/Critic', critic_loss, total_steps)
+                    if OUNoise:
+                        writer.add_scalar('Training/OUNoise_sigma', OUNoise.sigma, total_steps)
         
         pbar.update(steps) # Update the tqdm progress bar
         

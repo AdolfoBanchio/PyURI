@@ -16,7 +16,7 @@ from torch.utils.tensorboard import SummaryWriter
 from datetime import datetime
 from functools import partial
 from td3 import TD3Engine, TD3Config, td3_train
-from utils import ReplayBuffer, OUNoise, SequenceBuffer
+from utils import OUNoise, PrioritizedSequenceReplayBuffer
 from mlp import Critic
 from twc import (
     build_twc,
@@ -38,6 +38,10 @@ def parse_args():
     parser.add_argument("config_path", type=str, help="Path to the TD3 Config json")
 
     return parser.parse_args()
+
+import numpy as np
+import torch
+
 
 def main(cfg: TD3Config):
     # V2 twc hyperparameters
@@ -97,12 +101,33 @@ def main(cfg: TD3Config):
         device=cfg.device,
     )
 
-    replay_buf = SequenceBuffer(capacity=cfg.replay_buffer_size)
+    replay_buf = PrioritizedSequenceReplayBuffer(
+                        obs_shape=env.observation_space.shape,
+                        act_shape=env.action_space.shape,
+                        capacity=cfg.replay_buffer_size,
+                        alpha=0.6,
+                        beta_start=0.4,
+                        beta_frames=cfg.max_train_steps,  # o algo proporcional a #updates
+                        epsilon=1e-6,
+                        rho=0.4,   # del paper (W ≈ 5)
+                        eta=0.7,   # del paper
+                        seed=cfg.seed,
+                    )
+
+    noise = OUNoise(size=env.action_space.shape,
+                       mu=0.0,
+                       theta=0.15,
+                       sigma_init=0.35,
+                       sigma_min=0.08,
+                       decay_steps=cfg.max_train_steps * 0.6,   # 300k
+                       dt=1.0,
+                       seed=cfg.seed
+                       )
 
     # --- Logging ---
     timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
-    run_name = f"twc_mcc_V{cfg.use_v2}_{timestamp}"
-    log_dir = f'out/runs/td3/{run_name}'
+    run_name = f"twc_mcc_V{cfg.use_v2}_PER_OU_{timestamp}"
+    log_dir = f'out/runs/td3_PER_OU/{run_name}'
     writer = SummaryWriter(log_dir)
 
     os.makedirs(log_dir, exist_ok=True)
@@ -119,6 +144,8 @@ def main(cfg: TD3Config):
             writer=writer,
             timestamp=timestamp,
             config=cfg,
+            OUNoise=noise,
+            use_PER=True,
         )
 
 

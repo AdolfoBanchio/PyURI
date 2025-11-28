@@ -5,5 +5,9 @@ DDPG (Deep Deterministic Policy Gradient) utilities.
 from .replay_buffer import ReplayBuffer
 from .ou_noise import OUNoise
 from .sequence_buffer import SequenceBuffer
+from .PER_seq_buffer import PrioritizedSequenceReplayBuffer
 
-__all__ = ["ReplayBuffer", "OUNoise", "SequenceBuffer"]
+__all__ = ["ReplayBuffer", 
+           "OUNoise", 
+           "SequenceBuffer", 
+           "PrioritizedSequenceReplayBuffer"]

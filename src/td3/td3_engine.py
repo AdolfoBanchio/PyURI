@@ -7,6 +7,7 @@ import gymnasium as gym
 from tqdm import tqdm
 from copy import deepcopy
 from twc.twc_builder import TWC
+from typing import Optional
 
 class TD3Engine():
     """  
@@ -65,19 +66,13 @@ class TD3Engine():
             for p, tp in zip(net.parameters(), target_net.parameters()):
                 tp.data.mul_(1.0 - self.tau).add_(self.tau * p.data)
                 
-    def get_action(self, state, action_noise=None):
+    def get_action(self, state):
         s = torch.as_tensor(state, dtype=torch.float32, device=self.device).unsqueeze(0)
         
         with torch.no_grad():
             a = self.actor(s)
 
-        a = a.squeeze(0)
-        if action_noise is not None:
-            rng = torch.as_tensor((self.act_space.high - self.act_space.low),
-                                  device=self.device, dtype=torch.float32)
-            a = a + torch.as_tensor(action_noise(), device=self.device, dtype=torch.float32) * 0.5 * rng
-
-        return torch.clamp(a, self.action_low, self.action_high).cpu().numpy()
+        return torch.clamp(a, self.action_low, self.action_high).squeeze(0)
 
 
     def set_eval(self):
@@ -176,7 +171,11 @@ class TD3Engine():
             for name, state_pair in state_dict.items()
         }
     
-    def update_step_bptt(self, batch_of_sequences: dict, burn_in_length: int):
+    def update_step_bptt(self, 
+                         batch_of_sequences: dict, 
+                         burn_in_length: int,
+                         is_weights: Optional[torch.Tensor] = None # To use with PER
+                         ):
         """
         Performs a single update step for both actor and critic networks
         using Truncated Backpropagation Through Time (BPTT).
@@ -196,6 +195,11 @@ class TD3Engine():
         train_length = L - burn_in_length
         assert train_length > 0, "Sequence length must be > burn_in_length"
 
+        # Importance Sampling weights (B, 1)
+        if is_weights is None:
+            is_weights = torch.ones((B, 1), device=self.device, dtype=torch.float32)
+        else:
+            is_weights = is_weights.to(self.device)
         # 2. Burn-in Phase (No Gradients)
         # Reset states for the start of this sequence batch
         state_a = self.actor.get_initial_state(B, self.device)    
@@ -213,6 +217,8 @@ class TD3Engine():
 
         self.critic_optimizer.zero_grad(set_to_none=True)
         critic_loss = 0.0
+        td_error_accum = torch.zeros(B, device=self.device)
+
         for t in range(burn_in_length, L):
             obs_t = obs_seq[:, t, :] 
             act_t = act_seq[:, t, :]
@@ -221,7 +227,9 @@ class TD3Engine():
             mask_t = (1.0 - term_seq[:, t]).unsqueeze(1)
 
             with torch.no_grad():
-                noise = (torch.randn_like(act_t) * self.target_policy_noise).clamp(-self.target_noise_clip, self.target_noise_clip)
+                noise = (
+                    torch.randn_like(act_t) * self.target_policy_noise
+                    ).clamp(-self.target_noise_clip, self.target_noise_clip)
                 next_a_t, state_at = self.actor_target.forward_bptt(obs2_t, state_at)
                 next_a_t = (next_a_t + noise).clamp(self.action_low, self.action_high)
 
@@ -233,17 +241,32 @@ class TD3Engine():
 
             q1 = self.critic_1(obs_t, act_t)
             q2 = self.critic_2(obs_t, act_t)
-            critic_loss_t = F.mse_loss(q1, q_target) + F.mse_loss(q2, q_target)
-            
-            # --- ACCUMULATE LOSS ---
-            critic_loss = critic_loss + critic_loss_t
+
+            # TD-error for PER
+            td_t = (q1.detach() - q_target.detach()).abs().squeeze(-1)  # (B,)
+            td_error_accum += td_t
+
+            # Critic loss por muestras (sin reduction)
+            mse1 = (q1 - q_target).pow(2)  # (B, 1)
+            mse2 = (q2 - q_target).pow(2)  # (B, 1)
+            per_sample_loss = mse1 + mse2  # (B, 1)
+
+            # Aplicar importance sampling weights (broadcast (B,1))
+            per_sample_loss = per_sample_loss * is_weights
+
+            # Acumular loss (promedio sobre batch)
+            critic_loss = critic_loss + per_sample_loss.mean()
 
         # Average the loss and backpropagate
-        critic_loss = critic_loss / (L - burn_in_length)
+        critic_loss = critic_loss / train_length
         critic_loss.backward()
         # Clip gradients - ESSENTIAL for recurrent networks
-        torch.nn.utils.clip_grad_norm_(itertools.chain(self.critic_1.parameters(), self.critic_2.parameters()), 1.0)
+        torch.nn.utils.clip_grad_norm_(
+            itertools.chain(self.critic_1.parameters(), self.critic_2.parameters()), 1.0
+            )
         self.critic_optimizer.step()
+
+        td_errors_seq = td_error_accum / train_length   # (B,)
 
         # --- Actor (every X steps) ---
         actor_loss = None
@@ -282,7 +305,7 @@ class TD3Engine():
         else:
             actor_loss_r = actor_loss.item()
             
-        return actor_loss_r , critic_loss.item()
+        return actor_loss_r , critic_loss.item(), td_errors_seq
 
 
     @torch.no_grad()
@@ -295,9 +318,10 @@ class TD3Engine():
             self.actor.reset()
             done = False
             while not done:
-                a = self.get_action(obs, action_noise=None)
-                eval_actions.append(a)
-                obs, r, terminated, truncated, _ = env.step(a)
+                a = self.get_action(obs)
+                a_np = a.detach().cpu().numpy()
+                eval_actions.append(a_np)
+                obs, r, terminated, truncated, _ = env.step(a_np)
                 total += r
                 done = terminated or truncated
         self.actor.train()

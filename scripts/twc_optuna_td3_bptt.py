@@ -65,10 +65,8 @@ def objective(trial: optuna.Trial, study_name):
     cfg.actor_lr = trial.suggest_float("actor_lr", 1.5e-4, 3.0e-4, log=True)
     cfg.critic_lr = trial.suggest_float("critic_lr", 1.0e-4, 2.5e-4, log=True)
     
-    # (OU) 
-    cfg.sigma_start = trial.suggest_float("sigma_start", 0.35, 0.45)
-    cfg.sigma_end = 0.08
-    cfg.sigma_decay_episodes = trial.suggest_int("sigma_decay_episodes", 200, 250)
+    # Exploration noise 
+    cfg.exp_noise = trial.suggest_float("sigma_start", 0.1, 0.2)
 
     # Surrogate gradients TWC hyperparameters
     # Trial 0: 14.43 -> Rango [12, 16]
@@ -148,15 +146,6 @@ def objective(trial: optuna.Trial, study_name):
 
     replay_buf = SequenceBuffer(capacity=cfg.replay_buffer_size)
 
-    ou_noise = OUNoise(
-        action_dimension=action_dim,
-        mu=0,
-        theta=0.15,
-        sigma=cfg.sigma_start,
-        sigma_end=cfg.sigma_end,
-        sigma_decay_epis=cfg.sigma_decay_episodes,
-    )
-
     # --- Logging ---
     timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
     run_name = f"trial_{trial.number}_{timestamp}"
@@ -178,7 +167,6 @@ def objective(trial: optuna.Trial, study_name):
         td3_train(
             env=env,
             replay_buf=replay_buf,
-            ou_noise=ou_noise,
             engine=engine,
             writer=writer,
             timestamp=timestamp,
