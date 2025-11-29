@@ -49,7 +49,9 @@ class TD3Config:
     
     # Exploration noise Normal Gaussian (0, sigma)
     exp_noise: float = 0.1 # most common fixed std in TD3 algorithms
-
+    ou_sigma_init: float = 0.3
+    ou_sigma_end: float = 0.05
+    
     # Model-specific (TWC and Critic)
     twc_internal_steps: int = 3
     twc_trhesholds: list[float] = (-0.5, 0.0, 0.0)
@@ -140,6 +142,7 @@ def td3_train(
     # Use tqdm to track total steps
     pbar = tqdm(total=config.max_train_steps, initial=total_steps, desc="Training TD3")
 
+    eval_idx = 0
     while total_steps < max_train_steps:
         # New episode
         obs, _ = env.reset(seed=env_seed)
@@ -228,12 +231,14 @@ def td3_train(
                 writer.add_scalar('Training/StdAction', float(np.std(ep_actions)), total_steps)
             
             e += 1
+
             # Evaluation & Optuna Pruning
             if e % eval_interval_episodes == 0:
                 eval_ret, eval_avg_action = engine.evaluate_policy(env, episodes=eval_episodes)
                 writer.add_scalar('Evaluation/Return', eval_ret, total_steps)
                 writer.add_scalar('Evaluation/AvgAction', eval_avg_action, total_steps)
-            
+                eval_idx += 1
+
                 tqdm.write(f"\nEpisode {e}: TotalSteps: {total_steps}, EvalReturn: {eval_ret:.2f}")
                 
                 if eval_ret > best_ret:
@@ -245,11 +250,10 @@ def td3_train(
                 
                 # --- OPTUNA PRUNING LOGIC ---
                 if trial is not None:
-                    # Report using the episode count for Optuna, but use total_steps for logging
-                    trial.report(eval_ret, total_steps) 
+                    trial.report(eval_ret, step=eval_idx) 
                     if trial.should_prune():
-                        tqdm.write(f"Trial {trial.number} pruned at episode {e} with return {eval_ret}.")
-                        pbar.close() 
+                        tqdm.write(f"Trial {trial.number} pruned at eval {eval_idx} (episode {e}) with return {eval_ret:.2f}.")
+                        pbar.close()
                         raise optuna.TrialPruned()
 
     pbar.close()

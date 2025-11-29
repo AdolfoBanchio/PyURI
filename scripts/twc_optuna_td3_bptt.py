@@ -11,7 +11,8 @@ import numpy as np
 import torch
 import optuna
 import optunahub
-import optuna_distributed
+from optuna.samplers import TPESampler
+
 from torch.utils.tensorboard import SummaryWriter
 from datetime import datetime
 from functools import partial
@@ -39,49 +40,47 @@ def objective(trial: optuna.Trial, study_name):
     cfg.warmup_steps = 10_000
     cfg.eval_interval_episodes = 10
     cfg.eval_episodes = 10
+    cfg.model_prefix = "twc_td3_OU_actor"
     
     # Models fixed params
     cfg.critic_hidden_layers = [400, 300]
     cfg.twc_internal_steps = 1
     cfg.rnd_init = True
-    cfg.use_v2 = True
+    cfg.use_v2 = False
     
     # BPTT related
     cfg.use_bptt = True 
-    cfg.sequence_length = 8
-    cfg.burn_in_length = 4    
+    cfg.sequence_length = 9
+    cfg.burn_in_length = 5   
     cfg.batch_size = 256
-    
-    # TD3 Fixed params
     cfg.num_update_loops = 2 
     cfg.policy_delay = 2 # , policy is updated every 2 update steps
-    cfg.gamma = 0.982
-    cfg.tau = 0.008
-    cfg.target_noise = 0.28 
-    cfg.noise_clip = 0.32
-    # These fixed values are extracted from trial 0 of first Optuna iteration. (only succesfull from 20)
-
-    # --- Set Tunable Hyperparameters ---
-    cfg.actor_lr = trial.suggest_float("actor_lr", 1.5e-4, 3.0e-4, log=True)
-    cfg.critic_lr = trial.suggest_float("critic_lr", 1.0e-4, 2.5e-4, log=True)
     
-    # Exploration noise 
-    cfg.exp_noise = trial.suggest_float("sigma_start", 0.1, 0.2)
+    # --- Set Tunable Hyperparameters ---
+    cfg.actor_lr = trial.suggest_float("actor_lr", 1e-5, 2e-4, log=True)
+    cfg.critic_lr = trial.suggest_float("critic_lr", 1e-4, 1e-3, log=True)
 
-    # Surrogate gradients TWC hyperparameters
-    # Trial 0: 14.43 -> Rango [12, 16]
-    cfg.steepness_fire = trial.suggest_float("steep_fire", 12.0, 16.0)
-    # Trial 0: 7.13 -> Rango [6, 9]
-    cfg.steepness_gj = trial.suggest_float("steep_gj", 6.0, 9.0)
-    # Trial 0: 4.98 -> Rango [4, 6]
-    cfg.steepness_input = trial.suggest_float("steep_input", 4.0, 6.0)
-    # Trial 0: 0.0012 -> Rango [0.0008, 0.002]
-    cfg.input_thresh = trial.suggest_float("input_thresh", 8e-4, 2e-3, log=True)
-    # Trial 0: 0.023 -> Rango [0.015, 0.035]
-    cfg.leaky_slope = trial.suggest_float("leaky_slope", 0.015, 0.035)
+    cfg.gamma = trial.suggest_float("gamma", 0.985, 0.997)
+    cfg.tau   = trial.suggest_float("tau", 5e-4, 1e-2, log=True)
+
+    cfg.target_noise = trial.suggest_float("target_noise", 0.1, 0.4)
+    cfg.noise_clip   = trial.suggest_float("noise_clip",   0.2, 0.6)
+    cfg.ou_sigma_init = trial.suggest_float("sigma_start", 0.35, 0.5)
+    cfg.ou_sigma_end = trial.suggest_float("sigma_end", 0.03, 0.08)
 
     v2_params = {}
     if cfg.use_v2:
+        # Surrogate gradients TWC hyperparameters
+        # Trial 0: 14.43 -> Rango [12, 16]
+        cfg.steepness_fire = trial.suggest_float("steep_fire", 12.0, 16.0)
+        # Trial 0: 7.13 -> Rango [6, 9]
+        cfg.steepness_gj = trial.suggest_float("steep_gj", 6.0, 9.0)
+        # Trial 0: 4.98 -> Rango [4, 6]
+        cfg.steepness_input = trial.suggest_float("steep_input", 4.0, 6.0)
+        # Trial 0: 0.0012 -> Rango [0.0008, 0.002]
+        cfg.input_thresh = trial.suggest_float("input_thresh", 8e-4, 2e-3, log=True)
+        # Trial 0: 0.023 -> Rango [0.015, 0.035]
+        cfg.leaky_slope = trial.suggest_float("leaky_slope", 0.015, 0.035)
         v2_params = {
             'steepness_fire': cfg.steepness_fire,
             'steepness_gj': cfg.steepness_gj,
@@ -146,6 +145,15 @@ def objective(trial: optuna.Trial, study_name):
 
     replay_buf = SequenceBuffer(capacity=cfg.replay_buffer_size)
 
+    # Exploration noise 
+    noise = OUNoise(size=env.action_space.shape,
+                       mu=0.0,
+                       theta=0.15,
+                       sigma_init=cfg.ou_sigma_init,
+                       sigma_min=cfg.ou_sigma_end,
+                       decay_steps=cfg.max_train_steps * 0.7,   # FIXED
+                       seed=cfg.seed
+                       )
     # --- Logging ---
     timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
     run_name = f"trial_{trial.number}_{timestamp}"
@@ -171,7 +179,9 @@ def objective(trial: optuna.Trial, study_name):
             writer=writer,
             timestamp=timestamp,
             config=cfg,
-            trial=trial
+            trial=trial,
+            OUNoise=noise,
+            use_PER=False,
         )
 
         eval_ret, _eval_avg_action = engine.evaluate_policy(env, episodes=100)
@@ -186,22 +196,35 @@ def objective(trial: optuna.Trial, study_name):
 
 def main():
     timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
-    study_name = f"twc_mcc_td3_bptt_optuna_{timestamp}"
-    
+    #study_name = f"twc_mcc_td3_bptt_optuna_{timestamp}"
+    study_name = "twc_mcc_td3_bptt_optuna_20251117_092047"
+
     # Using TPE Sampler (common default) and MedianPruner
     pruner = optuna.pruners.MedianPruner(
-        n_startup_trials=4,  # Wait for 5 trials before pruning
-        n_warmup_steps=25,   # Wait for 30 episodes (3 evals)
-        interval_steps=10    # Prune every 10 episodes (1 eval)
+        n_startup_trials=5,  # Wait for 5 trials before pruning
+        n_warmup_steps=3,   # Wait for 30 episodes (3 evals)
+        interval_steps=1    # Prune every 10 episodes (1 eval)
+    )
+
+    sampler = TPESampler(
+        multivariate=True,      # modela dependencias entre hparams
+        group=True,             # agrupa parámetros relacionados
     )
     study = optuna.create_study(
         direction="maximize", 
-        sampler=optunahub.load_module("samplers/auto_sampler").AutoSampler(), 
+        sampler=sampler,
         pruner=pruner,
         storage="sqlite:///db.sqlite3", # Save results to a DB
         study_name=study_name,
         load_if_exists=True # Resume from a previous study if name matches
     )
+
+
+    if len(study.trials) > 0:
+        best_params = study.best_trial.params
+        print("\nEnqueuing previous best params for re-evaluation...")
+        study.enqueue_trial(best_params)
+
 
     # Wrapper for the objective function to pass the study_name
     # This is a clean way to get the study_name into the objective for logging
@@ -225,11 +248,12 @@ def main():
     print(json.dumps(study.best_params, indent=4))
     
     # Save best params to a file
-    best_params_path = os.path.join(f"out/runs/optuna/{study_name}", "best_params.json")
-    os.makedirs(os.path.dirname(best_params_path), exist_ok=True)
+    out_dir = f"out/runs/optuna/{study_name}_{timestamp}"
+    os.makedirs(out_dir, exist_ok=True)
+    best_params_path = os.path.join(out_dir, "best_params.json")
     with open(best_params_path, "w") as f:
         json.dump(study.best_params, f, indent=4)
-    print(f"Best params saved to {best_params_path}")
+    print(f"Saved to {best_params_path}")
 
 if __name__ == "__main__":
     main()

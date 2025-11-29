@@ -16,7 +16,7 @@ from torch.utils.tensorboard import SummaryWriter
 from datetime import datetime
 from functools import partial
 from td3 import TD3Engine, TD3Config, td3_train
-from utils import OUNoise, PrioritizedSequenceReplayBuffer
+from utils import OUNoise, SequenceBuffer
 from mlp import Critic
 from twc import (
     build_twc,
@@ -101,18 +101,8 @@ def main(cfg: TD3Config):
         device=cfg.device,
     )
 
-    replay_buf = PrioritizedSequenceReplayBuffer(
-                        obs_shape=env.observation_space.shape,
-                        act_shape=env.action_space.shape,
-                        capacity=cfg.replay_buffer_size,
-                        alpha=0.6,
-                        beta_start=0.6,
-                        beta_frames=cfg.max_train_steps,  # o algo proporcional a #updates
-                        epsilon=1e-6,
-                        rho=0.4,   # del paper (W ≈ 5)
-                        eta=0.7,   # del paper
-                        seed=cfg.seed,
-                    )
+    replay_buf = SequenceBuffer(capacity=cfg.replay_buffer_size)
+
 
     noise = OUNoise(size=env.action_space.shape,
                        mu=0.0,
@@ -126,8 +116,8 @@ def main(cfg: TD3Config):
 
     # --- Logging ---
     timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
-    run_name = f"twc_mcc_V{cfg.use_v2}_PER_OU_{timestamp}"
-    log_dir = f'out/runs/td3_PER_OU/{run_name}'
+    run_name = f"twc_mcc_V{cfg.use_v2}_OU_{timestamp}"
+    log_dir = f'out/runs/td3_OU/{run_name}'
     writer = SummaryWriter(log_dir)
 
     os.makedirs(log_dir, exist_ok=True)
@@ -145,7 +135,7 @@ def main(cfg: TD3Config):
             timestamp=timestamp,
             config=cfg,
             OUNoise=noise,
-            use_PER=True,
+            use_PER=False,
         )
 
 
