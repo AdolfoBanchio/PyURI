@@ -202,8 +202,8 @@ def main():
     # Using TPE Sampler (common default) and MedianPruner
     pruner = optuna.pruners.MedianPruner(
         n_startup_trials=5,  # Wait for 5 trials before pruning
-        n_warmup_steps=3,   # Wait for 30 episodes (3 evals)
-        interval_steps=1    # Prune every 10 episodes (1 eval)
+        n_warmup_steps=10,   # Wait for 30 episodes (3 evals)
+        interval_steps=3    # Prune every 10 episodes (1 eval)
     )
 
     sampler = TPESampler(

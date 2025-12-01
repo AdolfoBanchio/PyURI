@@ -325,6 +325,30 @@ class FIURIModuleV2(nn.Module):
         # out buffer modified in-place
         _scatter_add_batched(contrib, dst, out_buffer)
 
+    def init_state(
+        self,
+        batch_size: int,
+        device: Optional[torch.device] = None,
+        dtype: Optional[torch.dtype] = None,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """
+        Crea el estado inicial (E, O) como tensores (B, N).
+        Debe llamarse al inicio de una secuencia si no hay estado anterior.
+        """
+        if device is None:
+            device = self.threshold.device
+        if dtype is None:
+            dtype = self.threshold.dtype
+
+        E = torch.full(
+            (batch_size, self.num_cells),
+            self._init_E,
+            device=device,
+            dtype=dtype,
+        )
+        O = torch.full_like(E, self._init_O)
+        return E, O
+
     def _calculate_new_state(self, S, E, T, D):
         """
         Calculates new (E, O) state from S, E, T, and D.
@@ -360,26 +384,30 @@ class FIURIModuleV2(nn.Module):
         Performs one step of the neuron dynamics.
         If S is None, uses S = in_state (i.e., as if input_current were zero).
         """
-        E, O = state if state else (self._init_E, self._init_O)
+        if state is None:
+            # asumimos batch_size = 1 aquí; para secuencias usá init_state()
+            E, O = self.init_state(batch_size=1)
+        else:
+            E, O = state
         S = torch.clamp(E, self.clamp_min, self.clamp_max)
-
         return self._calculate_new_state(S, E, self.threshold, self.decay)
 
     def forward(self, chem_influence, state = None, gj_bundle = None, o_pre = None) -> torch.Tensor:
         B = chem_influence.size(0)
         
         # Extract current state for use in gap junction computation
-        E, O = state if state else (self._init_E, self._init_O)
+        if state is None:
+            E, O = self.init_state(batch_size=B, device=self.device, dtype=torch.float32)
+        else:
+            E, O = state
         
         if gj_bundle is not None:
             assert o_pre is not None, "o_pre must be provided when gj_bundle is not None"
-            # Pass current state to gap junction computation
-            current_E_tensor = E if isinstance(E, torch.Tensor) else torch.full((B, self.num_cells), E, dtype=chem_influence.dtype, device=chem_influence.device)
-            
+            # Pass current state to gap junction computation            
             self._compute_gj_sum(
                 gj_bundle, 
                 o_pre, 
-                current_in_state=current_E_tensor, 
+                current_in_state=E, 
                 out_buffer=chem_influence
             )
         

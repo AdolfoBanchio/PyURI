@@ -3,7 +3,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from typing import Callable
-from fiuri import FIURIModule, FiuriDenseConn, FiuriSparseGJConn
+from fiuri import FIURIModule, FiuriDenseConn, FiuriSparseGJConn, FIURIModuleV2
 
 
 class TWC (nn.Module):
@@ -13,9 +13,9 @@ class TWC (nn.Module):
         n_inputs and device (compatible with utils.twc_io_wrapper.default_obs_encoder).
      
         """
-        def __init__(self, in_layer: FIURIModule,
-                    hid_layer: FIURIModule,
-                    out_layer: FIURIModule,
+        def __init__(self, in_layer: FIURIModuleV2,
+                    hid_layer: FIURIModuleV2,
+                    out_layer: FIURIModuleV2,
                     in2hid_IN: FiuriDenseConn,
                     in2hid_GJ: FiuriSparseGJConn,
                     hid_IN: FiuriDenseConn,
@@ -23,7 +23,6 @@ class TWC (nn.Module):
                     hid2out_EX: FiuriDenseConn,
                     obs_encoder: Callable,
                     action_decoder: Callable,
-                    internal_steps: int = 1,
                     log_stats: bool = True,
                     **kwargs):
             super().__init__(**kwargs)
@@ -53,12 +52,9 @@ class TWC (nn.Module):
                 "out": [],
             }
             self._state = None
-            self.internal_steps = internal_steps
 
-        def _init_layer_state(self, layer: FIURIModule, batch_size: int, device, dtype):
-            E0 = torch.full((batch_size, layer.num_cells), layer._init_E, device=device, dtype=dtype)
-            O0 = torch.full((batch_size, layer.num_cells), layer._init_O, device=device, dtype=dtype)
-            return (E0, O0)
+        def _init_layer_state(self, layer: FIURIModuleV2, batch_size: int, device, dtype):
+            return layer.init_state(batch_size=batch_size, device=device, dtype=dtype)
 
         def _make_state(self, batch_size: int, device, dtype):
             return {
@@ -90,15 +86,14 @@ class TWC (nn.Module):
                             state_in: dict[str, tuple[torch.Tensor, torch.Tensor]]
                             ) -> tuple[torch.Tensor, dict[str, tuple[torch.Tensor, torch.Tensor]]]:   
             device = next(self.parameters()).device
-            if x.device != device:
-                x = x.to(device)
+            assert x.device == device, "Pasa x.to(device) antes de llamar al TWC"
+
             ex_in, in_in = self.obs_encoder(x, n_inputs=4, device=device)
             B = ex_in.size(0)
             
-            # Use the passed-in state
             current_state = state_in 
             # Create a new state dict, don't modify the old one inplace
-            state_out = {}
+            state_out: dict[str, tuple[torch.Tensor, torch.Tensor]] = {}
 
             # For input layer: directly set states from encoder values (matching ariel feedNN behavior)
             # We do the same: E = encoded_value, O = encoded_value
@@ -115,45 +110,38 @@ class TWC (nn.Module):
             # Phase 1: computeVnext() for all neurons
             #   - For input neurons: feedNN() just set states, so getOutputState() returns NEW states
             #   - For other neurons: getOutputState() returns OLD states (before commit)
-            # Phase 2: commitComputation() for all neurons (commits buffered states)
-            # We mimic the behaviour by using the state_in as the previous state of the network.
             in_out_new, in_state_new = self.in_layer.neuron_step(in_state)
             in_out_for_connections = in_O
             state_out["in"] = in_state_new
 
-            hid_state_cur = current_state["hid"]
-            hid_state_old = (hid_state_cur[0].clone(), hid_state_cur[1].clone())
+            # Hidden Layer
+            hid_E_old, hid_O_old = current_state["hid"]
+            hid_state_old = (hid_E_old, hid_O_old)   # sin clone            
             
-            hid_out_new = None # Initialize
+            in2hid_influence = self.in2hid_IN(in_out_for_connections)
+            in2hid_gj_bundle = self.in2hid_GJ(in_out_for_connections)
+                        
+            hid_ex_influence = self.hid_EX(hid_O_old)
+            hid_in_influence = self.hid_IN(hid_O_old)
+            hid2hid_influence = hid_ex_influence + hid_in_influence
             
-            for _ in range(self.internal_steps):
-                in2hid_influence = self.in2hid_IN(in_out_for_connections)
-                in2hid_gj_bundle = self.in2hid_GJ(in_out_for_connections)
-                
-                hid_out_old = current_state["hid"][1]
-                
-                hid_ex_influence = self.hid_EX(hid_out_old)
-                hid_in_influence = self.hid_IN(hid_out_old)
-                hid2hid_influence = hid_ex_influence + hid_in_influence
-                
-                hid_out_new, hid_state_new = self.hid_layer(
-                    in2hid_influence + hid2hid_influence,
-                    state=hid_state_old,
-                    gj_bundle=in2hid_gj_bundle,
-                    o_pre=in_out_for_connections,
-                )
-                state_out["hid"] = hid_state_new
-                
-                # Update hid_state_old for next internal step
-                hid_state_old = hid_state_new
+            hid_out_new, hid_state_new = self.hid_layer(
+                in2hid_influence + hid2hid_influence,
+                state=hid_state_old,
+                gj_bundle=in2hid_gj_bundle,
+                o_pre=in_out_for_connections,
+            )
+            state_out["hid"] = hid_state_new
 
-            hid_out_old_final = current_state["hid"][1]
+            hid_out_old_final = hid_O_old
             hid2out_ex_influence = self.hid2out(hid_out_old_final)
             
-            out_state_cur = current_state["out"]
+
+            out_E_old, out_O_old = current_state["out"]
+            out_state_old = (out_E_old, out_O_old)
             out_output, out_layer_state = self.out_layer(
                 hid2out_ex_influence,
-                state=(out_state_cur[0].clone(), out_state_cur[1].clone())
+                state=out_state_old
             )
             state_out["out"] = out_layer_state
             
