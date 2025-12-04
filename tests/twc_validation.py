@@ -412,7 +412,6 @@ def main():
     twc_v1 = build_twc(
         obs_encoder=mcc_obs_encoder,
         action_decoder=twc_out_2_mcc_action,
-        internal_steps=1,
         initial_thresholds=[0.0,0.0,0.0],
         initial_decays=[0.1,0.1,0.1],
         rnd_init=True,
@@ -432,7 +431,6 @@ def main():
     twc_v2 = build_twc(
         obs_encoder=mcc_obs_encoder,
         action_decoder=twc_out_2_mcc_action,
-        internal_steps=1,
         initial_thresholds=[0.0,0.0,0.0],
         initial_decays=[0.1,0.1,0.1],
         rnd_init=True,

@@ -102,9 +102,7 @@ class TD3Engine():
     
     def update_step_bptt(self, 
                          batch_of_sequences: dict, 
-                         burn_in_length: int,
-                         is_weights: Optional[torch.Tensor] = None # To use with PER
-                         ):
+                         burn_in_length: int,):
         """
         Performs a single update step for both actor and critic networks
         using Truncated Backpropagation Through Time (BPTT).
@@ -124,11 +122,6 @@ class TD3Engine():
         train_length = L - burn_in_length
         assert train_length > 0, "Sequence length must be > burn_in_length"
 
-        # Importance Sampling weights (B, 1)
-        if is_weights is None:
-            is_weights = torch.ones((B, 1), device=self.device, dtype=torch.float32)
-        else:
-            is_weights = is_weights.to(self.device)
         # 2. Burn-in Phase (No Gradients)
         # Reset states for the start of this sequence batch
         state_a = self.actor.get_initial_state(B, self.device)    
@@ -145,20 +138,19 @@ class TD3Engine():
         state_at = self._detach_state_dict(state_at)
 
         self.critic_optimizer.zero_grad(set_to_none=True)
-        critic_loss = 0.0
-        td_error_accum = torch.zeros(B, device=self.device)
+        
+        q_target_list = []
 
-        for t in range(burn_in_length, L):
-            obs_t = obs_seq[:, t, :] 
-            act_t = act_seq[:, t, :]
-            rew_t = rew_seq[:, t].unsqueeze(1)
-            obs2_t = obs2_seq[:, t, :]
-            mask_t = (1.0 - term_seq[:, t]).unsqueeze(1)
+        with torch.no_grad():
+            for t in range(burn_in_length, L):
+                obs2_t = obs2_seq[:, t, :]                         # (B, obs_dim)
+                rew_t  = rew_seq[:, t].unsqueeze(1)                # (B,1)
+                mask_t = (1.0 - term_seq[:, t]).unsqueeze(1)       # (B,1)
 
-            with torch.no_grad():
                 noise = (
-                    torch.randn_like(act_t) * self.target_policy_noise
-                    ).clamp(-self.target_noise_clip, self.target_noise_clip)
+                    torch.randn_like(act_seq[:, t, :]) * self.target_policy_noise
+                ).clamp(-self.target_noise_clip, self.target_noise_clip)
+
                 next_a_t, state_at = self.actor_target.forward_bptt(obs2_t, state_at)
                 next_a_t = (next_a_t + noise).clamp(self.action_low, self.action_high)
 
@@ -166,56 +158,68 @@ class TD3Engine():
                 q2_t = self.critic_2_target(obs2_t, next_a_t)
                 min_q = torch.minimum(q1_t, q2_t)
 
-                q_target = rew_t + self.gamma * mask_t * min_q
+                q_target_t = rew_t + self.gamma * mask_t * min_q   # (B,1)
+                q_target_list.append(q_target_t)
 
-            q1 = self.critic_1(obs_t, act_t)
-            q2 = self.critic_2(obs_t, act_t)
+        # stack temporal: (B, T, 1)
+        q_target_seq = torch.stack(q_target_list, dim=1)           # T = train_length
 
-            # TD-error for PER
-            td_t = (q1.detach() - q_target.detach()).abs().squeeze(-1)  # (B,)
-            td_error_accum += td_t
+        # Preparamos inputs para críticos en una sola pasada
+        obs_train = obs_seq[:, burn_in_length:, :]                 # (B,T,obs_dim)
+        act_train = act_seq[:, burn_in_length:, :]                 # (B,T,act_dim)
 
-            # Critic loss por muestras (sin reduction)
-            mse1 = (q1 - q_target).pow(2)  # (B, 1)
-            mse2 = (q2 - q_target).pow(2)  # (B, 1)
-            per_sample_loss = mse1 + mse2  # (B, 1)
+        # Flatten B,T -> BT para MLP críticos
+        BT = B * train_length
+        obs_flat = obs_train.reshape(BT, -1)                       # (BT, obs_dim)
+        act_flat = act_train.reshape(BT, -1)                       # (BT, act_dim)
+        q_target_flat = q_target_seq.reshape(BT, 1)                # (BT, 1)
 
-            # Aplicar importance sampling weights (broadcast (B,1))
-            per_sample_loss = per_sample_loss * is_weights
+        # Forward de críticos en una sola llamada cada uno
+        q1_flat = self.critic_1(obs_flat, act_flat)                # (BT,1)
+        q2_flat = self.critic_2(obs_flat, act_flat)                # (BT,1)
 
-            # Acumular loss (promedio sobre batch)
-            critic_loss = critic_loss + per_sample_loss.mean()
+        # Critic loss por muestra
+        mse1 = (q1_flat - q_target_flat).pow(2)                    # (BT,1)
+        mse2 = (q2_flat - q_target_flat).pow(2)                    # (BT,1)
+        per_sample_loss_flat = (mse1 + mse2)                       # (BT,1)
 
-        # Average the loss and backpropagate
-        critic_loss = critic_loss / train_length
+        critic_loss = per_sample_loss_flat.mean()                  # escalar
         critic_loss.backward()
-        # Clip gradients - ESSENTIAL for recurrent networks
-        torch.nn.utils.clip_grad_norm_(
-            itertools.chain(self.critic_1.parameters(), self.critic_2.parameters()), 1.0
-            )
-        self.critic_optimizer.step()
 
-        td_errors_seq = td_error_accum / train_length   # (B,)
+        torch.nn.utils.clip_grad_norm_(
+            itertools.chain(self.critic_1.parameters(), self.critic_2.parameters()),
+            1.0,
+        )
+        self.critic_optimizer.step()
 
         # --- Actor (every X steps) ---
         actor_loss = None
         self.total_updates += 1
         if self.total_updates % self.policy_delay == 0:
-            # Temporarily freeze critic params so they are treated as constants
             for p in self.critic_1.parameters():
                 p.requires_grad_(False)
 
-            actor_loss = 0.0
+            # Re-usamos state_a (ya detach, al final del burn-in)
+            state_a_actor = state_a
+            actions_list = []
+
             for t in range(burn_in_length, L):
                 obs_t = obs_seq[:, t, :]
-                a_t, state_a = self.actor.forward_bptt(obs_t, state_a)
-                q_val = self.critic_1(obs_t, a_t)
-                
-                actor_loss = actor_loss - q_val.mean()
+                a_t, state_a_actor = self.actor.forward_bptt(obs_t, state_a_actor)
+                actions_list.append(a_t)
 
-            actor_loss = actor_loss / (L - burn_in_length)
+            # (B,T,act_dim) y (B,T,obs_dim)
+            act_seq_actor = torch.stack(actions_list, dim=1)       # (B,T,A)
+            obs_seq_actor = obs_seq[:, burn_in_length:, :]         # (B,T,O)
 
-            # Restore critic params to require grad for future critic updates
+            # Flatten BT
+            obs_actor_flat = obs_seq_actor.reshape(BT, -1)
+            act_actor_flat = act_seq_actor.reshape(BT, -1)
+
+            q_val_flat = self.critic_1(obs_actor_flat, act_actor_flat)  # (BT,1)
+
+            actor_loss = -q_val_flat.mean()
+
             for p in self.critic_1.parameters():
                 p.requires_grad_(True)
 
@@ -224,17 +228,17 @@ class TD3Engine():
             torch.nn.utils.clip_grad_norm_(self.actor.parameters(), 1.0)
             self.actor_optimizer.step()
 
-            # Soft-update targets
-            self.soft_update(net=self.actor, target_net=self.actor_target)
-            self.soft_update(net=self.critic_1,  target_net=self.critic_1_target)
-            self.soft_update(net=self.critic_2,  target_net=self.critic_2_target)
+            # Soft update targets
+            self.soft_update(net=self.actor,   target_net=self.actor_target)
+            self.soft_update(net=self.critic_1, target_net=self.critic_1_target)
+            self.soft_update(net=self.critic_2, target_net=self.critic_2_target)
 
         if actor_loss is None:
             actor_loss_r = float('nan')
         else:
             actor_loss_r = actor_loss.item()
             
-        return actor_loss_r , critic_loss.item(), td_errors_seq
+        return actor_loss_r , critic_loss.item()
 
 
     @torch.no_grad()

@@ -76,9 +76,9 @@ class FIURIModule(nn.Module):
         self.decay     = nn.Parameter(torch.empty(num_cells), requires_grad=True)
         
         if rnd_init:
-            # TODO: Check and define proper random init ranges
-            nn.init.uniform_(self.threshold, -1.0, 2.0)
-            nn.init.uniform_(self.decay, 0.05, 1.0)
+            # Match Ariel's RandomSeek init: positive-only draws before training adjusts them
+            nn.init.uniform_(self.threshold, 0.0, 1.0)   # thresholds in [0, 1]
+            nn.init.uniform_(self.decay, 0.0, 0.5)       # decay factors in [0, 0.5]
         else:
             nn.init.constant_(self.threshold, initial_threshold)
             nn.init.constant_(self.decay, initial_decay)
@@ -122,6 +122,30 @@ class FIURIModule(nn.Module):
         new_e = torch.where(S > T, new_o, torch.where(mask, E - D, S))
         return new_o, (new_e, new_o)
 
+    def init_state(
+        self,
+        batch_size: int,
+        device: Optional[torch.device] = None,
+        dtype: Optional[torch.dtype] = None,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """
+        Crea el estado inicial (E, O) como tensores (B, N).
+        Debe llamarse al inicio de una secuencia si no hay estado anterior.
+        """
+        if device is None:
+            device = self.threshold.device
+        if dtype is None:
+            dtype = self.threshold.dtype
+
+        E = torch.full(
+            (batch_size, self.num_cells),
+            self._init_E,
+            device=device,
+            dtype=dtype,
+        )
+        O = torch.full_like(E, self._init_O)
+        return E, O
+    
     def neuron_step(self, state):
         """
         Performs one step of the neuron dynamics.
@@ -293,9 +317,9 @@ class FIURIModuleV2(nn.Module):
         self.decay     = nn.Parameter(torch.empty(num_cells), requires_grad=True)
         
         if rnd_init:
-            # TODO: Check and define proper random init ranges
-            nn.init.uniform_(self.threshold, -1.0, 2.0)
-            nn.init.uniform_(self.decay, 0.05, 1.0)
+            # Match Ariel's RandomSeek init: positive-only draws before training adjusts them
+            nn.init.uniform_(self.threshold, 0.0, 1.0)   # thresholds in [0, 1]
+            nn.init.uniform_(self.decay, 0.0, 0.5)       # decay factors in [0, 0.5]
         else:
             nn.init.constant_(self.threshold, initial_threshold)
             nn.init.constant_(self.decay, initial_decay)
@@ -355,10 +379,7 @@ class FIURIModuleV2(nn.Module):
         """
         # leaky relu allows some gradient flow when S < T
         new_o = F.leaky_relu(S - T, negative_slope=self.leaky_slope)
-        
-        # we force positive D trying to enforce training stability
-        D_positive = F.softplus(D) 
-        
+
         # fire probability gate (0,1)
         fire_prob = torch.sigmoid(self.steepness_fire * (S - T))
         
@@ -368,7 +389,7 @@ class FIURIModuleV2(nn.Module):
         
         # output cases:
         E_fired = new_o          # 1: (S > T) -> E_next = O_next
-        E_decay = E - D_positive # 2: (S == E) -> E_next = E - D. 
+        E_decay = E - D          # 2: (S == E) -> E_next = E - D. 
         E_subthresh = S          # 3: (S <= T y S != E) -> E_next = S.
 
         # E_nonfired = (if S != E: E_subthresh else: E_decay)

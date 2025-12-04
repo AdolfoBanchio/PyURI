@@ -135,7 +135,6 @@ def main(cfg: TD3Config):
             timestamp=timestamp,
             config=cfg,
             OUNoise=noise,
-            use_PER=False,
         )
 
 

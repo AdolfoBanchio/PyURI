@@ -12,7 +12,6 @@ json_path = os.path.join(os.path.dirname(__file__), "TWC_fiu.json")
 
 def build_twc(obs_encoder: Callable,
               action_decoder: Callable,
-              internal_steps: int,
               initial_thresholds: list[float] = [ -0.5, 0.0, 0.0 ],
               initial_decays: list[float] = [2.2, 0.1, 0.1],
               rnd_init: bool = False,
@@ -88,5 +87,4 @@ def build_twc(obs_encoder: Callable,
                hid2out_EX=hid2out_EX, 
                obs_encoder=obs_encoder, 
                action_decoder=action_decoder, 
-               internal_steps=internal_steps, 
                log_stats=log_stats)

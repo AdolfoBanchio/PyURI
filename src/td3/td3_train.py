@@ -9,13 +9,9 @@ from dataclasses import dataclass, asdict
 from typing import Optional
 from tqdm import tqdm
 from torch.utils.tensorboard import SummaryWriter
-
 from .td3_engine import TD3Engine
-from utils.replay_buffer import ReplayBuffer
 from utils.sequence_buffer import SequenceBuffer
 from utils.ou_noise import OUNoise
-from utils.PER_seq_buffer import PrioritizedSequenceReplayBuffer
-
 
 @dataclass
 class TD3Config:
@@ -34,7 +30,6 @@ class TD3Config:
     eval_episodes: int = 10
 
     # --- BPTT options ---
-    use_bptt: bool = False
     sequence_length: Optional[int] = None
     burn_in_length: Optional[int] = None
 
@@ -105,20 +100,20 @@ class TD3Config:
 
 def td3_train(
     env: gym.Env,
-    replay_buf: ReplayBuffer,
+    replay_buf: SequenceBuffer,
     engine: TD3Engine,
     writer: SummaryWriter,
     timestamp: str,
     config: TD3Config,
     trial: optuna.Trial = None,
     OUNoise: OUNoise = None,
-    use_PER: bool = None,
 ):
     """
     Main training loop for TD3, adapted to run for a maximum number of time steps.
     """
     total_steps = 0
     best_ret = -np.inf
+    best_model_path = None
     e = 0  # Episode counter
 
     # loop variables
@@ -127,7 +122,6 @@ def td3_train(
     warmup_steps =  config.warmup_steps
     num_update_loops = config.num_update_loops
     update_every_steps = config.update_every
-    use_bptt = config.use_bptt
     batch_size = config.batch_size
     sequence_length = config.sequence_length
     device = config.device
@@ -200,19 +194,9 @@ def td3_train(
             # Update every X episodes 
             if total_steps > warmup_steps and (total_steps % update_every_steps == 0):
                 for _ in range(num_update_loops):
-                    # Logic for BPTT or standard update remains the same
-                    if use_bptt:
-                        if use_PER:
-                            seq_batch, is_weights, idxs = replay_buf.sample(batch_size, sequence_length, device)
-                            actor_loss, critic_loss, td_errors = engine.update_step_bptt(seq_batch, burn_in_length, is_weights)
-                            replay_buf.update_priorities(idxs, td_errors)
-                        else:
-                            seq_batch = replay_buf.sample(batch_size, sequence_length, device)
-                            actor_loss, critic_loss, _ = engine.update_step_bptt(seq_batch, burn_in_length)
-                    else:
-                        batch = replay_buf.sample(batch_size, device)
-                        actor_loss, critic_loss = engine.update_step(batch)
-                    
+                    seq_batch = replay_buf.sample(batch_size, sequence_length, device)
+                    actor_loss, critic_loss = engine.update_step_bptt(seq_batch, burn_in_length)
+
                 # Log losses every 100 steps to avoid exessive IO
                 if total_steps % 100 == 0:
                     writer.add_scalar('Loss/Actor', actor_loss, total_steps)
@@ -246,21 +230,24 @@ def td3_train(
                     prefix = model_prefix
                     model_path = os.path.join(writer.log_dir, f"{prefix}_best_{timestamp}.pth")
                     torch.save(engine.actor.state_dict(), model_path)
+                    best_model_path = model_path
                     tqdm.write(f"New best evaluation reward: {best_ret:.2f}. Model saved to {model_path}")
                 
                 # --- OPTUNA PRUNING LOGIC ---
                 if trial is not None:
-                    trial.report(eval_ret, step=eval_idx) 
+                    # Report current and best-so-far; prune based on best to avoid transient dips
+                    trial.report(eval_ret, step=eval_idx * 2)
+                    trial.report(best_ret, step=eval_idx * 2 + 1) # report best second to be used by prunner. 
                     if trial.should_prune():
-                        tqdm.write(f"Trial {trial.number} pruned at eval {eval_idx} (episode {e}) with return {eval_ret:.2f}.")
+                        tqdm.write(f"Trial {trial.number} pruned at eval {eval_idx} (episode {e}) with best return {best_ret:.2f}.")
                         pbar.close()
                         raise optuna.TrialPruned()
 
     pbar.close()
     
     # --- Final Save ---
-    prefix = model_prefix + "_final_bptt" if use_bptt else model_prefix + "_final"
+    prefix = f"{model_prefix}_final"
     model_path = os.path.join(writer.log_dir, f"{prefix}_{timestamp}.pth")            
     torch.save(engine.actor.state_dict(), model_path)
     print(f"Final Model saved to {model_path}")           
-    return best_ret
+    return best_ret, best_model_path
