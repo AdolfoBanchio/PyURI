@@ -27,7 +27,8 @@ class TD3Engine():
                  policy_delay: int = 2,
                  target_policy_noise: float = 0.2,
                  target_noise_clip: float = 0.5,
-                 device: torch.device = torch.device("cpu")):
+                 device: torch.device = torch.device("cpu"),
+                 use_seq_optimized: bool = False):
         
         self.gamma = gamma
         self.tau = tau
@@ -54,6 +55,7 @@ class TD3Engine():
         self.policy_delay = int(policy_delay)
         self.target_policy_noise = float(target_policy_noise)
         self.target_noise_clip = float(target_noise_clip)
+        self.use_seq_optimized = bool(use_seq_optimized)
 
         # cache bounds as tensors
         self.action_low  = torch.as_tensor(self.act_space.low,  device=self.device, dtype=torch.float32)
@@ -139,34 +141,54 @@ class TD3Engine():
 
         self.critic_optimizer.zero_grad(set_to_none=True)
         
-        q_target_list = []
-
-        with torch.no_grad():
-            for t in range(burn_in_length, L):
-                obs2_t = obs2_seq[:, t, :]                         # (B, obs_dim)
-                rew_t  = rew_seq[:, t].unsqueeze(1)                # (B,1)
-                mask_t = (1.0 - term_seq[:, t]).unsqueeze(1)       # (B,1)
-
-                noise = (
-                    torch.randn_like(act_seq[:, t, :]) * self.target_policy_noise
-                ).clamp(-self.target_noise_clip, self.target_noise_clip)
-
-                next_a_t, state_at = self.actor_target.forward_bptt(obs2_t, state_at)
-                next_a_t = (next_a_t + noise).clamp(self.action_low, self.action_high)
-
-                q1_t = self.critic_1_target(obs2_t, next_a_t)
-                q2_t = self.critic_2_target(obs2_t, next_a_t)
-                min_q = torch.minimum(q1_t, q2_t)
-
-                q_target_t = rew_t + self.gamma * mask_t * min_q   # (B,1)
-                q_target_list.append(q_target_t)
-
-        # stack temporal: (B, T, 1)
-        q_target_seq = torch.stack(q_target_list, dim=1)           # T = train_length
-
-        # Preparamos inputs para críticos en una sola pasada
+        # Preparamos inputs/targets para críticos
         obs_train = obs_seq[:, burn_in_length:, :]                 # (B,T,obs_dim)
         act_train = act_seq[:, burn_in_length:, :]                 # (B,T,act_dim)
+
+        with torch.no_grad():
+            if self.use_seq_optimized:
+                # Vectoriza acciones target con forward_sequence
+                next_a_seq, _ = self.actor_target.forward_sequence(obs2_seq[:, burn_in_length:, :], state_at)  # (B,T,A)
+                noise = (torch.randn_like(next_a_seq) * self.target_policy_noise).clamp(
+                    -self.target_noise_clip, self.target_noise_clip
+                )
+                next_a_seq = (next_a_seq + noise).clamp(self.action_low, self.action_high)
+
+                # Flatten y calcular Q targets de una pasada
+                BT = B * train_length
+                obs2_flat = obs2_seq[:, burn_in_length:, :].reshape(BT, -1)
+                next_a_flat = next_a_seq.reshape(BT, -1)
+                q1_flat = self.critic_1_target(obs2_flat, next_a_flat)
+                q2_flat = self.critic_2_target(obs2_flat, next_a_flat)
+                min_q_flat = torch.minimum(q1_flat, q2_flat)
+                min_q_seq = min_q_flat.view(B, train_length, 1)
+
+                rew_train = rew_seq[:, burn_in_length:].unsqueeze(-1)  # (B,T,1)
+                mask_train = (1.0 - term_seq[:, burn_in_length:]).unsqueeze(-1)  # (B,T,1)
+                q_target_seq = rew_train + self.gamma * mask_train * min_q_seq
+            else:
+                q_target_list = []
+                for t in range(burn_in_length, L):
+                    obs2_t = obs2_seq[:, t, :]                         # (B, obs_dim)
+                    rew_t  = rew_seq[:, t].unsqueeze(1)                # (B,1)
+                    mask_t = (1.0 - term_seq[:, t]).unsqueeze(1)       # (B,1)
+
+                    noise = (
+                        torch.randn_like(act_seq[:, t, :]) * self.target_policy_noise
+                    ).clamp(-self.target_noise_clip, self.target_noise_clip)
+
+                    next_a_t, state_at = self.actor_target.forward_bptt(obs2_t, state_at)
+                    next_a_t = (next_a_t + noise).clamp(self.action_low, self.action_high)
+
+                    q1_t = self.critic_1_target(obs2_t, next_a_t)
+                    q2_t = self.critic_2_target(obs2_t, next_a_t)
+                    min_q = torch.minimum(q1_t, q2_t)
+
+                    q_target_t = rew_t + self.gamma * mask_t * min_q   # (B,1)
+                    q_target_list.append(q_target_t)
+
+                # stack temporal: (B, T, 1)
+                q_target_seq = torch.stack(q_target_list, dim=1)           # T = train_length
 
         # Flatten B,T -> BT para MLP críticos
         BT = B * train_length
@@ -200,17 +222,18 @@ class TD3Engine():
                 p.requires_grad_(False)
 
             # Re-usamos state_a (ya detach, al final del burn-in)
-            state_a_actor = state_a
-            actions_list = []
-
-            for t in range(burn_in_length, L):
-                obs_t = obs_seq[:, t, :]
-                a_t, state_a_actor = self.actor.forward_bptt(obs_t, state_a_actor)
-                actions_list.append(a_t)
-
-            # (B,T,act_dim) y (B,T,obs_dim)
-            act_seq_actor = torch.stack(actions_list, dim=1)       # (B,T,A)
-            obs_seq_actor = obs_seq[:, burn_in_length:, :]         # (B,T,O)
+            if self.use_seq_optimized:
+                act_seq_actor, _ = self.actor.forward_sequence(obs_seq[:, burn_in_length:, :], state_a)
+                obs_seq_actor = obs_seq[:, burn_in_length:, :]
+            else:
+                state_a_actor = state_a
+                actions_list = []
+                for t in range(burn_in_length, L):
+                    obs_t = obs_seq[:, t, :]
+                    a_t, state_a_actor = self.actor.forward_bptt(obs_t, state_a_actor)
+                    actions_list.append(a_t)
+                act_seq_actor = torch.stack(actions_list, dim=1)       # (B,T,A)
+                obs_seq_actor = obs_seq[:, burn_in_length:, :]         # (B,T,O)
 
             # Flatten BT
             obs_actor_flat = obs_seq_actor.reshape(BT, -1)

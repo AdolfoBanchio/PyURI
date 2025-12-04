@@ -193,6 +193,110 @@ class TWC (nn.Module):
             """
             return self._recurrent_step(x, state_in)
 
+        def forward_sequence(self,
+                             x_seq: torch.Tensor,
+                             state_in: dict | None = None
+                             ) -> tuple[torch.Tensor, dict]:
+            """
+            Procesa una secuencia completa de observaciones (B, T, 2) en una pasada.
+            Devuelve (acciones (B,T,A), estado_final).
+
+            - Mantiene la misma dinámica que _recurrent_step (usa valores "old" en conexiones).
+            - Optimiza cómputo pre-calculando pesos efectivos y el bundle de GJ una sola vez.
+            """
+            device = next(self.parameters()).device
+            if x_seq.device != device:
+                x_seq = x_seq.to(device)
+
+            assert x_seq.dim() == 3 and x_seq.size(-1) == 2, "x_seq debe ser (B, T, 2)"
+            B, T, _ = x_seq.shape
+            dtype = x_seq.dtype
+
+            # Estado inicial
+            if state_in is None:
+                state = self.get_initial_state(B, device, dtype)
+            else:
+                state = state_in
+
+            # Pre-encode inputs en bloque
+            x_flat = x_seq.reshape(B * T, -1)
+            ex_flat, in_flat = self.obs_encoder(x_flat, n_inputs=4, device=device)
+            inp_flat = ex_flat + in_flat  # (BT, 4)
+            inp_seq = inp_flat.view(B, T, -1)  # (B, T, 4)
+
+            # Precompute effective weights (una sola vez, con gradientes)
+            def eff_w_dense(conn):
+                import torch.nn.functional as F
+                w_pos = F.softplus(conn.w)
+                return w_pos * conn.w_mask
+
+            w_in2hid_in = eff_w_dense(self.in2hid_IN)   # (n_in, n_hid)
+            w_hid_ex = eff_w_dense(self.hid_EX)         # (n_hid, n_hid)
+            w_hid_in = eff_w_dense(self.hid_IN)         # (n_hid, n_hid)
+            w_hid2out = eff_w_dense(self.hid2out)       # (n_hid, n_out)
+
+            # Precompute GJ bundle (índices + pesos positivos)
+            gj_src_idx = self.in2hid_GJ.gj_idx[0]
+            gj_dst_idx = self.in2hid_GJ.gj_idx[1]
+            gj_w_pos = F.softplus(self.in2hid_GJ.gj_w)
+            gj_bundle = (gj_src_idx, gj_dst_idx, gj_w_pos)
+
+            actions = []
+
+            # Desempaquetar estado actual
+            in_state = state["in"]
+            hid_state = state["hid"]
+            out_state = state["out"]
+
+            for t in range(T):
+                # 1) Capa de entrada: seteo directo (E=O=input_values)
+                input_values = inp_seq[:, t, :]  # (B, 4)
+                in_E = input_values
+                in_O = input_values
+                in_state_tmp = (in_E, in_O)
+                # Actualizar dinámica interna para logging/consistencia
+                _, in_state = self.in_layer.neuron_step(in_state_tmp)
+
+                # 2) Conexiones a Hidden usando outputs "old" de input (in_O)
+                in_out_for_conn = in_O
+                # IN: signo negativo
+                in2hid_influence = - in_out_for_conn.matmul(w_in2hid_in)  # (B, n_hid)
+
+                # 3) Hidden recurrente con EX/IN densos + GJ de entrada
+                hid_E_old, hid_O_old = hid_state
+                hid_ex_infl = hid_O_old.matmul(w_hid_ex)
+                hid_in_infl = - hid_O_old.matmul(w_hid_in)
+                hid2hid_infl = hid_ex_infl + hid_in_infl
+
+                hid_chem = in2hid_influence + hid2hid_infl
+                hid_out_new, hid_state_new = self.hid_layer(
+                    hid_chem,
+                    state=hid_state,
+                    gj_bundle=gj_bundle,
+                    o_pre=in_out_for_conn,
+                )
+
+                # 4) Proyección a salida usando hid_O_old (fase dos etapas)
+                hid2out_ex_infl = hid_O_old.matmul(w_hid2out)
+
+                out_out, out_state_new = self.out_layer(
+                    hid2out_ex_infl,
+                    state=out_state,
+                )
+
+                # 5) Decodificar acción desde estado interno de salida
+                out_internal_states = out_state_new[0]
+                a_t = self.action_decoder(out_internal_states)  # (B, A)
+                actions.append(a_t)
+
+                # Avanzar estado
+                hid_state = hid_state_new
+                out_state = out_state_new
+
+            a_seq = torch.stack(actions, dim=1)  # (B, T, A)
+            final_state = {"in": in_state, "hid": hid_state, "out": out_state}
+            return a_seq, final_state
+
         def reset(self):
             """Resets the internal state variables for each layer."""
             self._state = None

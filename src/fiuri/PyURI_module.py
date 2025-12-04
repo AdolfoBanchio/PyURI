@@ -151,7 +151,11 @@ class FIURIModule(nn.Module):
         Performs one step of the neuron dynamics.
         If S is None, uses S = in_state (i.e., as if input_current were zero).
         """
-        E, O = state if state else (self._init_E, self._init_O)
+        # Be explicit about None to avoid ambiguous Tensor truthiness
+        if state is None:
+            E, O = self._init_E, self._init_O
+        else:
+            E, O = state
         S = torch.clamp(E, self.clamp_min, self.clamp_max)
 
         return self._calculate_new_state(S, E, self.threshold, self.decay)
@@ -160,7 +164,11 @@ class FIURIModule(nn.Module):
         B = chem_influence.size(0)
         
         # Extract current state for use in gap junction computation
-        E, O = state if state else (self._init_E, self._init_O)
+        # Avoid ambiguous checks; keep scalar fast-path for caller convenience
+        if state is None:
+            E, O = self._init_E, self._init_O
+        else:
+            E, O = state
         
         if gj_bundle is not None:
             assert o_pre is not None, "o_pre must be provided when gj_bundle is not None"
@@ -417,8 +425,9 @@ class FIURIModuleV2(nn.Module):
         B = chem_influence.size(0)
         
         # Extract current state for use in gap junction computation
+        # If caller didn't pass state, initialize on the fly on the same device/dtype
         if state is None:
-            E, O = self.init_state(batch_size=B, device=self.device, dtype=torch.float32)
+            E, O = self.init_state(batch_size=B, device=chem_influence.device, dtype=chem_influence.dtype)
         else:
             E, O = state
         
