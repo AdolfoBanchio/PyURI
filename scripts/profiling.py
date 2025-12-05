@@ -124,6 +124,7 @@ def build_training_objects(cfg: TD3Config):
         target_policy_noise=cfg.target_noise,
         target_noise_clip=cfg.noise_clip,
         device=cfg.device,
+        use_seq_optimized=True
     )
 
     # --- Replay buffer secuencial con PER ---
@@ -212,7 +213,6 @@ def run_training_with_profiling(
                 timestamp=timestamp,
                 config=cfg,
                 OUNoise=noise,
-                use_PER=False,
             )
 
     else:
