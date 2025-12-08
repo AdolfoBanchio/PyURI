@@ -162,7 +162,7 @@ def td3_train(
             else: 
                 """  
                 this get action, makes a forward pass where the actor maintain his own state
-                through all the active training episode. In the update step network intenrla state
+                through all the active training episode. In the update step network internal state
                 is managed differntly to avoid intervinig in the state of the network during
                 the active episode. 
                 """

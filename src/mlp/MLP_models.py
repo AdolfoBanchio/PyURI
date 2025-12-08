@@ -67,3 +67,48 @@ class Critic(nn.Module):
         x = F.relu(self.fcs2(x))
         q = self.out(x)                                   # (B, 1)
         return q
+
+class BestCritic(nn.Module):
+    def __init__(self, state_dim: int, action_dim: int, hidden_dim: int = 256):
+        super().__init__()
+        
+        # Input Normalization
+        # affine=False because we don't want to learn a shift, just scale.
+        self.state_norm = nn.BatchNorm1d(state_dim, affine=False, track_running_stats=True)
+
+        self.l1 = nn.Linear(state_dim + action_dim, hidden_dim)
+        self.ln1 = nn.LayerNorm(hidden_dim)  # Stability fix
+        
+        self.l2 = nn.Linear(hidden_dim, hidden_dim)
+        self.ln2 = nn.LayerNorm(hidden_dim)  # Stability fix
+
+        self.l3 = nn.Linear(hidden_dim, 1)
+
+        self.apply(self._init_weights)
+
+    def _init_weights(self, m):
+        if isinstance(m, nn.Linear):
+            nn.init.orthogonal_(m.weight, gain=nn.init.calculate_gain('relu'))
+            if m.bias is not None:
+                nn.init.zeros_(m.bias)
+
+    def forward(self, state, action):
+        """
+        Args:
+            state: (Batch, State_Dim) - Raw observations [pos, vel]
+            action: (Batch, Action_Dim)
+        """
+        # 1. Normalize State (Fixes the 0.001 velocity scale issue)
+        s_norm = self.state_norm(state)
+        
+        # 2. Concatenate (Standard SOTA for low-dim states)
+        x = torch.cat([s_norm, action], dim=1)
+        
+        # 3. MLP with LayerNorm
+        x = F.relu(self.ln1(self.l1(x)))
+        x = F.relu(self.ln2(self.l2(x)))
+        
+        # 4. Value Output
+        q = self.l3(x)
+        
+        return q
