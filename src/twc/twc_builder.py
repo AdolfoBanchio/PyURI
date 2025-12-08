@@ -88,5 +88,4 @@ def build_twc(obs_encoder: Callable,
                hid2out_EX=hid2out_EX, 
                obs_encoder=obs_encoder, 
                action_decoder=action_decoder, 
-               internal_steps=internal_steps, 
                log_stats=log_stats)

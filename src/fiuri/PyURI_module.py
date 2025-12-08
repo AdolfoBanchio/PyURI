@@ -89,6 +89,29 @@ class FIURIModule(nn.Module):
         self.clamp_min = clamp_min
         self.clamp_max = clamp_max
 
+    def init_state(
+        self,
+        batch_size: int,
+        device: Optional[torch.device] = None,
+        dtype: Optional[torch.dtype] = None,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """
+        Crea el estado inicial (E, O) como tensores (B, N).
+        Debe llamarse al inicio de una secuencia si no hay estado anterior.
+        """
+        if device is None:
+            device = self.threshold.device
+        if dtype is None:
+            dtype = self.threshold.dtype
+
+        E = torch.full(
+            (batch_size, self.num_cells),
+            self._init_E,
+            device=device,
+            dtype=dtype,
+        )
+        O = torch.full_like(E, self._init_O)
+        return E, O
 
     def _compute_gj_sum(self, gj_bundle, o_pre: torch.Tensor, current_in_state: torch.Tensor, out_buffer: torch.Tensor) -> None:
         """
@@ -357,7 +380,7 @@ class FIURIModuleV2(nn.Module):
         new_o = F.leaky_relu(S - T, negative_slope=self.leaky_slope)
         
         # we force positive D trying to enforce training stability
-        D_positive = F.softplus(D) 
+        D_positive = D #F.softplus(D)
         
         # fire probability gate (0,1)
         fire_prob = torch.sigmoid(self.steepness_fire * (S - T))
