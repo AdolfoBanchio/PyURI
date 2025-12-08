@@ -17,7 +17,7 @@ from datetime import datetime
 from functools import partial
 from td3 import TD3Engine, TD3Config, td3_train
 from utils import OUNoise, SequenceBuffer
-from mlp import Critic
+from mlp import Critic, BestCritic
 from twc import (
     build_twc,
     mcc_obs_encoder,
@@ -75,9 +75,13 @@ def main(cfg: TD3Config):
         log_stats=False,
         **v2_params
     )
-    critic_1 = Critic(state_dim, action_dim, size=cfg.critic_hidden_layers)
-    critic_2 = Critic(state_dim, action_dim, size=cfg.critic_hidden_layers)
-
+    
+    #critic_1 = Critic(state_dim, action_dim, size=cfg.critic_hidden_layers)
+    #critic_2 = Critic(state_dim, action_dim, size=cfg.critic_hidden_layers)
+    
+    critic_1 = BestCritic(state_dim=state_dim, action_dim=action_dim)
+    critic_2 = BestCritic(state_dim=state_dim, action_dim=action_dim)
+    
     # Optimizers
     actor_opt = torch.optim.Adam(actor.parameters(),  lr=cfg.actor_lr)
     critic_opt = torch.optim.Adam(
@@ -117,7 +121,7 @@ def main(cfg: TD3Config):
     # --- Logging ---
     timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
     run_name = f"twc_mcc_V{cfg.use_v2}_OU_{timestamp}"
-    log_dir = f'out/runs/td3_OU/{run_name}'
+    log_dir = f'out/runs/td3_OU_BRANCH/{run_name}'
     writer = SummaryWriter(log_dir)
 
     os.makedirs(log_dir, exist_ok=True)
