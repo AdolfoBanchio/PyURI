@@ -380,7 +380,7 @@ class FIURIModuleV2(nn.Module):
         new_o = F.leaky_relu(S - T, negative_slope=self.leaky_slope)
         
         # we force positive D trying to enforce training stability
-        D_positive = D #F.softplus(D)
+        D_positive = F.softplus(D)
         
         # fire probability gate (0,1)
         fire_prob = torch.sigmoid(self.steepness_fire * (S - T))

@@ -34,7 +34,6 @@ class TD3Config:
     eval_episodes: int = 10
 
     # --- BPTT options ---
-    use_bptt: bool = False
     sequence_length: Optional[int] = None
     burn_in_length: Optional[int] = None
 
@@ -105,7 +104,7 @@ class TD3Config:
 
 def td3_train(
     env: gym.Env,
-    replay_buf: ReplayBuffer,
+    replay_buf: SequenceBuffer,
     engine: TD3Engine,
     writer: SummaryWriter,
     timestamp: str,
@@ -127,7 +126,6 @@ def td3_train(
     warmup_steps =  config.warmup_steps
     num_update_loops = config.num_update_loops
     update_every_steps = config.update_every
-    use_bptt = config.use_bptt
     batch_size = config.batch_size
     sequence_length = config.sequence_length
     device = config.device
@@ -200,18 +198,8 @@ def td3_train(
             # Update every X episodes 
             if total_steps > warmup_steps and (total_steps % update_every_steps == 0):
                 for _ in range(num_update_loops):
-                    # Logic for BPTT or standard update remains the same
-                    if use_bptt:
-                        if use_PER:
-                            seq_batch, is_weights, idxs = replay_buf.sample(batch_size, sequence_length, device)
-                            actor_loss, critic_loss, td_errors = engine.update_step_bptt(seq_batch, burn_in_length, is_weights)
-                            replay_buf.update_priorities(idxs, td_errors)
-                        else:
-                            seq_batch = replay_buf.sample(batch_size, sequence_length, device)
-                            actor_loss, critic_loss, _ = engine.update_step_bptt(seq_batch, burn_in_length)
-                    else:
-                        batch = replay_buf.sample(batch_size, device)
-                        actor_loss, critic_loss = engine.update_step(batch)
+                    seq_batch = replay_buf.sample(batch_size, sequence_length, device)
+                    actor_loss, critic_loss, _ = engine.update_step_bptt(seq_batch, burn_in_length)
                     
                 # Log losses every 100 steps to avoid exessive IO
                 if total_steps % 100 == 0:
