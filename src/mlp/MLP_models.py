@@ -75,15 +75,11 @@ class BestCritic(nn.Module):
         # Input Normalization
         # affine=False because we don't want to learn a shift, just scale.
         self.state_norm = nn.BatchNorm1d(state_dim, affine=False, track_running_stats=True)
-
         self.l1 = nn.Linear(state_dim + action_dim, hidden_dim)
         self.ln1 = nn.LayerNorm(hidden_dim)  # Stability fix
-        
         self.l2 = nn.Linear(hidden_dim, hidden_dim)
         self.ln2 = nn.LayerNorm(hidden_dim)  # Stability fix
-
         self.l3 = nn.Linear(hidden_dim, 1)
-
         self.apply(self._init_weights)
 
     def _init_weights(self, m):
@@ -98,17 +94,20 @@ class BestCritic(nn.Module):
             state: (Batch, State_Dim) - Raw observations [pos, vel]
             action: (Batch, Action_Dim)
         """
-        # 1. Normalize State (Fixes the 0.001 velocity scale issue)
-        s_norm = self.state_norm(state)
+        is_3d = state.dim() == 3
+        if is_3d:
+            B, T, _ = state.shape
+            state = state.reshape(-1, state.shape[-1])
+            action = action.reshape(-1, action.shape[-1])
+
+        # --- Q1 ---
+        s_norm1 = self.state_norm(state)
+        x1 = torch.cat([s_norm1, action], dim=1)
+        x1 = F.relu(self.ln1(self.l1(x1)))
+        x1 = F.relu(self.ln2(self.l2(x1)))
+        q1 = self.l3(x1)
         
-        # 2. Concatenate (Standard SOTA for low-dim states)
-        x = torch.cat([s_norm, action], dim=1)
-        
-        # 3. MLP with LayerNorm
-        x = F.relu(self.ln1(self.l1(x)))
-        x = F.relu(self.ln2(self.l2(x)))
-        
-        # 4. Value Output
-        q = self.l3(x)
-        
-        return q
+        # 4. Reshape Output
+        if is_3d:
+            q1 = q1.view(B, T, 1)
+        return q1

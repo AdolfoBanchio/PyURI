@@ -2,6 +2,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import json
+from twc.twc_io import mcc_obs_to_potentials, twc_out_2_mcc_action as canonical_out_decoder
 
 TWC_JSON = {
   "neurons": {
@@ -77,75 +78,16 @@ def bounded_affine(xmin, ymin, xmax, ymax, x):
 
 def mcc_obs_encoder(obs: torch.Tensor, device=None):
     """
-    Matches ModelInterfaces.py: BinaryInterface.feedNN()
-    Maps Env Obs -> [-20, 20] Potentials
+    Shared I/O mapping with TWC: returns (B,4) potentials [PVD, PLM, AVM, ALM].
+    Uses the same underlying encoder as the original TWC (EX/IN channels summed).
     """
-    if device is None: device = obs.device
-    if obs.dim() == 1: obs = obs.unsqueeze(0)
-    
-    pos = obs[:, 0]
-    vel = obs[:, 1]
-    
-    # Fill values
-    min_fill = torch.full_like(pos, MIN_STATE_INTERFACE, device=device)
-    zero_fill = torch.zeros_like(pos, device=device) # Not strictly used as 'zero', but as placeholders
-
-    # --- Position (IN1) ---
-    pos_mask = pos >= POS_VALLEY_VAL
-    
-    # Logic from feedNN:
-    # If >= Valley: corVal = value/max; Pot = (Max-Min)*corVal + Min
-    # If < Valley:  corVal = value/(-min); Pot = (Max-Min)*(-corVal) + Min
-    cor_pos = torch.where(pos_mask, pos / POS_MAX_VAL, pos / (-POS_MIN_VAL))
-    
-    # Calculate Potential
-    term_range = MAX_STATE_INTERFACE - MIN_STATE_INTERFACE # 40.0
-    
-    pos_pot = torch.where(
-        pos_mask,
-        term_range * cor_pos + MIN_STATE_INTERFACE,      # Positive Branch
-        term_range * (-cor_pos) + MIN_STATE_INTERFACE    # Negative Branch
-    )
-    
-    # Mapping to Neurons (PLM/AVM)
-    # IN1: position -> PLM (positive) / AVM (negative)
-    PLM = torch.where(pos_mask, pos_pot, min_fill)
-    AVM = torch.where(pos_mask, min_fill, pos_pot)
-
-    # --- Velocity (IN2) ---
-    vel_mask = vel >= VEL_VALLEY_VAL
-    
-    cor_vel = torch.where(vel_mask, vel / VEL_MAX_VAL, vel / (-VEL_MIN_VAL))
-    
-    vel_pot = torch.where(
-        vel_mask,
-        term_range * cor_vel + MIN_STATE_INTERFACE,
-        term_range * (-cor_vel) + MIN_STATE_INTERFACE
-    )
-    
-    # Mapping to Neurons (ALM/PVD)
-    # IN2: velocity -> ALM (positive) / PVD (negative)
-    ALM = torch.where(vel_mask, vel_pot, min_fill)
-    PVD = torch.where(vel_mask, min_fill, vel_pot)
-
-    # Stack Order: [PVD, PLM, AVM, ALM] matching JSON group "input"
-    # Note: min_fill is -20.0. The inputs are FORCED to -20.0 if inactive.
-    # We return one tensor for the values to clamp
-    input_vals = torch.stack([PVD, PLM, AVM, ALM], dim=1)
-    
-    return input_vals
+    if device is None:
+        device = obs.device
+    return mcc_obs_to_potentials(obs, device=device)
 
 def twc_out_2_mcc_action(y: torch.Tensor, fwd_idx=1, rev_idx=0, gain=1.0):
-    neg_St = y[:, rev_idx] 
-    pos_St = y[:, fwd_idx] 
-    
-    # FIX: Map both to POSITIVE [0, 1] range
-    # In legacy, minVal is -1.0. bounded_affine uses -minVal = 1.0.
-    retval1 = bounded_affine(MIN_STATE_INTERFACE, 0.0, MAX_STATE_INTERFACE, OUT_MAX_VAL, pos_St)
-    retval2 = bounded_affine(MIN_STATE_INTERFACE, 0.0, MAX_STATE_INTERFACE, OUT_MIN_VAL, neg_St) # Use Positive Target
-    
-    # Then Subtract: FWD - REV
-    return (retval1 - retval2).unsqueeze(1) * gain
+    # Delegate to canonical decoder to keep identical scaling with TWC implementation.
+    return canonical_out_decoder(y, fwd_idx=fwd_idx, rev_idx=rev_idx, gain=gain)
 # ==========================================
 # 3. The GPU-Optimized Circuit Class
 # ==========================================
@@ -201,11 +143,46 @@ class PyUriTwc(nn.Module):
         self.stored_E = None
         self.stored_O = None
 
+    def set_params_of_name(self, neu_name:str, th, df):
+        idx = self.neuron_names[neu_name]
+        self.thresholds[idx] = th
+        self.decay[idx] = df
+        
+    def set_params(self, thresholds: dict, decays: dict, weights: dict):
+        """
+        Set model parameters from dictionaries mapping names to values.
+        This is useful for synchronizing with a legacy model.
+
+        Args:
+            thresholds (dict): {neuron_name: threshold_val}
+            decays (dict): {neuron_name: decay_val}
+            weights (dict): {(src_name, dst_name): weight_val}
+        """
+        with torch.no_grad():
+            for name, th in thresholds.items():
+                if name in self.neuron_names:
+                    idx = self.neuron_names[name]
+                    self.thresholds[idx] = float(th)
+            
+            for name, d in decays.items():
+                if name in self.neuron_names:
+                    idx = self.neuron_names[name]
+                    self.decay[idx] = float(d)
+
+            self.weights.fill_(-100.0)  # Represents ~0 after softplus
+            for (src, dst), w in weights.items():
+                if src in self.neuron_names and dst in self.neuron_names:
+                    src_idx, dst_idx = self.neuron_names[src], self.neuron_names[dst]
+                    if w > 1e-6:
+                        inv_w = torch.log(torch.expm1(torch.tensor(w, dtype=self.weights.dtype, device=self.device)))
+                        self.weights[dst_idx, src_idx] = inv_w
+
+        
     def get_initial_state(self, batch_size, device):
         # Initial state is 0.0 (Quiescent)
         return torch.zeros(batch_size, self.num_neurons, device=device), torch.zeros(batch_size, self.num_neurons, device=device)
 
-    def reset_state(self, batch_size=1):
+    def reset(self, batch_size=1):
         self.stored_E, self.stored_O = self.get_initial_state(batch_size, self.device)
 
     def reset_internal_only(self, batch_size=1):
@@ -317,7 +294,7 @@ class PyUriTwc(nn.Module):
     def forward(self, obs):
         """Stateful Forward"""
         if self.stored_E is None or self.stored_E.shape[0] != obs.shape[0]:
-            self.reset_state(obs.shape[0])
+            self.reset(obs.shape[0])
             
         action, (new_E, new_O) = self.forward_step(obs, self.stored_E, self.stored_O)
         
@@ -385,12 +362,20 @@ class PyUriTwc_V2(nn.Module):
         self.input_indices = [self.neuron_names[n] for n in config_json['groups']['input']]
         self.output_indices = [self.neuron_names[n] for n in config_json['groups']['output']]
 
+        mask = torch.zeros(self.num_neurons, device=device, dtype=torch.bool)
+        mask[self.input_indices] = True
+        self.register_buffer('input_bool_mask', mask)
+
         # --- Parameters ---
         # Legacy Model.py: noiseParam limits weights/thresholds/decay to [0.0, 10.0]
         # We initialize them in a biologically plausible range for this model
-        self.weights = nn.Parameter(torch.rand(self.num_neurons, self.num_neurons) * 5.0) # Range 0-5
-        self.thresholds = nn.Parameter(torch.rand(self.num_neurons) * 5.0)                # Range 0-5
-        self.decay = nn.Parameter(torch.rand(self.num_neurons) * 0.5)                     # Range 0-0.5
+        self.weights = nn.Parameter(torch.empty(self.num_neurons, self.num_neurons)) # Range 0-5
+        self.thresholds = nn.Parameter(torch.empty(self.num_neurons))                # Range 0-5
+        self.decay = nn.Parameter(torch.empty(self.num_neurons))                     # Range 0-0.5
+
+        nn.init.kaiming_uniform_(self.weights)
+        nn.init.uniform_(self.thresholds, 0.0, 1.0)
+        nn.init.uniform_(self.decay, 0.0, 0.5)
 
         # surrogate gradients parameters
         self.steepness_gj = steepness_gj
@@ -403,11 +388,45 @@ class PyUriTwc_V2(nn.Module):
         self.stored_E = None
         self.stored_O = None
 
+    def set_params_of_name(self, neu_name:str, th, df):
+        idx = self.neuron_names[neu_name]
+        self.thresholds[idx] = th
+        self.decay[idx] = df
+        
+    def set_params(self, thresholds: dict, decays: dict, weights: dict):
+        """
+        Set model parameters from dictionaries mapping names to values.
+        This is useful for synchronizing with a legacy model.
+
+        Args:
+            thresholds (dict): {neuron_name: threshold_val}
+            decays (dict): {neuron_name: decay_val}
+            weights (dict): {(src_name, dst_name): weight_val}
+        """
+        with torch.no_grad():
+            for name, th in thresholds.items():
+                if name in self.neuron_names:
+                    idx = self.neuron_names[name]
+                    self.thresholds[idx] = float(th)
+            
+            for name, d in decays.items():
+                if name in self.neuron_names:
+                    idx = self.neuron_names[name]
+                    self.decay[idx] = float(d)
+
+            self.weights.fill_(-100.0)  # Represents ~0 after softplus
+            for (src, dst), w in weights.items():
+                if src in self.neuron_names and dst in self.neuron_names:
+                    src_idx, dst_idx = self.neuron_names[src], self.neuron_names[dst]
+                    if w > 1e-6:
+                        inv_w = torch.log(torch.expm1(torch.tensor(w, dtype=self.weights.dtype, device=self.device)))
+                        self.weights[dst_idx, src_idx] = inv_w
+
     def get_initial_state(self, batch_size, device):
         # Initial state is 0.0 (Quiescent)
         return torch.zeros(batch_size, self.num_neurons, device=device), torch.zeros(batch_size, self.num_neurons, device=device)
 
-    def reset_state(self, batch_size=1):
+    def reset(self, batch_size=1):
         self.stored_E, self.stored_O = self.get_initial_state(batch_size, self.device)
 
     def reset_internal_only(self, batch_size=1):
@@ -478,25 +497,55 @@ class PyUriTwc_V2(nn.Module):
         return O_new, E_new
 
     def forward_step(self, obs, state_E, state_O):
+        """
+        Pure Functional Implementation (No In-Place Ops).
+        Required for torch.compile(mode='reduce-overhead') + Autograd.
+        """
         batch_size = obs.shape[0]
 
-        # 1. Encode
+        # 1. Encode (New tensor created)
         input_vals = self.obs_encoder(obs, device=self.device)
+             
+        # Generate indices tensor
+        idx_tensor = torch.tensor(self.input_indices, 
+                                  device=self.device).unsqueeze(0).expand(batch_size, -1)        
+        # Method: Use scatter to create a "Update Mask" 
+        # Then: Result = Old * (1-Mask) + New * Mask
         
-        # 2. Hybrid State Construction
-        state_O_hybrid = state_O.clone() 
-        state_O_hybrid[:, self.input_indices] = input_vals
+        zeros = torch.zeros_like(state_E)
+                
+        # Optimized Functional Hybrid State:
+        # 1. Create a "Input Only" tensor (zeros elsewhere)
+        input_layer_state = zeros.scatter(1, idx_tensor, input_vals)
         
-        state_E_hybrid = state_E.clone()
-        state_E_hybrid[:, self.input_indices] = input_vals
+        # 2. Create a "Non-Input Only" tensor (zeros at inputs)
+        # We can use a binary mask for this.
+        if not hasattr(self, 'input_bool_mask'):
+            mask = torch.zeros(self.num_neurons, device=self.device, dtype=torch.bool)
+            mask[self.input_indices] = True
+            self.register_buffer('input_bool_mask', mask)
+        
+        # Logic: 
+        # state_hybrid = state_old * (~mask) + input_vals_scattered
+        
+        # Note: state_O is (B, N). input_bool_mask is (N). Broadcasting works (B, N).
+        non_input_mask = ~self.input_bool_mask
+        
+        state_O_hybrid = (state_O * non_input_mask) + input_layer_state
+        state_E_hybrid = (state_E * non_input_mask) + input_layer_state
 
-        # 3. Physics
-        O_new, E_new = self._physics_step(state_E_hybrid, state_O_hybrid)
+        # 3. Physics (Pure Functional)
+        O_calc, E_calc = self._physics_step(state_E_hybrid, state_O_hybrid)
 
-        # 4. Input Persistence (FIX: Uncommented for exact replication)
-        # Force the inputs to hold their encoded value for the next step's "old state"
-        O_new[:, self.input_indices] = input_vals
-        E_new[:, self.input_indices] = input_vals
+        # 4. Input Persistence (Functional)
+        # Logic: We want the final E_new to use 'input_vals' at input indices,
+        # and 'E_calc' at other indices.
+        
+        # Same logic as above:
+        # E_new = (E_calc * non_input_mask) + input_layer_state
+        
+        O_new = (O_calc * non_input_mask) + input_layer_state
+        E_new = (E_calc * non_input_mask) + input_layer_state
 
         # 5. Decode
         output_neuron_states = E_new[:, self.output_indices]
@@ -507,7 +556,7 @@ class PyUriTwc_V2(nn.Module):
     def forward(self, obs):
         """Stateful Forward"""
         if self.stored_E is None or self.stored_E.shape[0] != obs.shape[0]:
-            self.reset_state(obs.shape[0])
+            self.reset(obs.shape[0])
             
         action, (new_E, new_O) = self.forward_step(obs, self.stored_E, self.stored_O)
         
@@ -535,12 +584,16 @@ def build_fiuri_twc():
                     obs_encoder=mcc_obs_encoder,
                     action_decoder=twc_out_2_mcc_action)
 
-def build_fiuri_twc_v2():
+def build_fiuri_twc_v2(steepness_gj,
+                       steepness_fire,
+                       steepness_input,
+                       input_thresh,
+                       leaky_slope):
     return PyUriTwc_V2(config_json=TWC_JSON,
                        obs_encoder=mcc_obs_encoder,
                        action_decoder=twc_out_2_mcc_action,
-                       steepness_gj = 10.0,
-                       steepness_fire = 10.0,
-                       steepness_input = 5.0,
-                       input_thresh = 0.01,
-                       leaky_slope = 0.01,)
+                       steepness_gj = steepness_gj,
+                       steepness_fire = steepness_fire,
+                       steepness_input = steepness_input,
+                       input_thresh = input_thresh,
+                       leaky_slope = leaky_slope,)

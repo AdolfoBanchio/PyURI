@@ -52,7 +52,7 @@ def sync_parameters(ariel_mod: FiuModel, twc_v2: PyUriTwc):
 
 def run_test():
     print("--- Starting Comparison Test ---")
-    
+    device = ('cuda' if torch.cuda.is_available() else 'cpu')
     # Load ariel model
     xml_path = os.path.join(Path(__file__).parent, 'TWFiuriBaseFIU.xml')
     fiu = FiuModel('FIU')
@@ -63,10 +63,19 @@ def run_test():
     opt = build_fiuri_twc()
     opt.reset_state(1)
     
-    opt2 = build_fiuri_twc_v2()
+    opt2 = build_fiuri_twc_v2(steepness_fire=1,
+                                  steepness_gj=1,
+                                  steepness_input=1,
+                                  input_thresh=0,
+                                  leaky_slope=0.2)
     opt2.reset_state(1)
     
-    opt2.load_state_dict(opt.state_dict())
+    opt2.load_state_dict(opt.state_dict(), strict=False)
+
+    opt.to(device=device)
+    opt2.to(device=device)
+    opt.device = device
+    opt2.device = device
     # 3. Sync
     sync_parameters(fiu, opt)
     

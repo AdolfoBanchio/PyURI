@@ -24,6 +24,7 @@ from twc.twc_io import (
 )
 from ariel.Model import Model as FiuModel
 from ariel import Connection as con
+from fiuri import build_fiuri_twc_v2, build_fiuri_twc, PyUriTwc
 
 ENV = "MountainCarContinuous-v0"
 SEED = 42
@@ -172,6 +173,42 @@ def sync_neuron_params_from_torch_to_ariel(twc, fiu_model, neuron_names_by_layer
     set_layer_params(twc.hid_layer, neuron_names_by_layer['hidden'], nn.setNeuronTestThresholdOfName, nn.setNeuronTestDecayFactorOfName)
     set_layer_params(twc.out_layer, neuron_names_by_layer['output'], nn.setNeuronTestThresholdOfName, nn.setNeuronTestDecayFactorOfName)
 
+@torch.no_grad()
+def sync_parameters(ariel_mod: FiuModel, twc_v2: PyUriTwc):
+    """
+    This functions copies all the parameters from torch version to original version
+    """
+    name_to_idx = twc_v2.neuron_names
+    print(name_to_idx)
+    with torch.no_grad():
+        # Reset weights
+        sp = torch.nn.functional.softplus
+
+        # Neuron params
+        for n in ariel_mod.neuralnetwork.getNeuronNames():
+            idx = name_to_idx.get(n, None)
+            if idx is None:
+                continue
+            neuron = ariel_mod.getNeuron(n)
+            twc_v2.thresholds[idx] = neuron.getTestThreshold()
+            twc_v2.decay[idx] = neuron.getTestDecayFactor()
+
+
+        # Connection weights
+        for conn in ariel_mod.neuralnetwork.getConnections():
+            src = conn.getSource().getName()
+            dst = conn.getTarget().getName()
+            si = name_to_idx.get(src, None)
+            di = name_to_idx.get(dst, None)
+            if si is None or di is None:
+                continue
+            w = torch.as_tensor(conn.getTestWeight())
+            # because other sync methods from torch -> ariel
+            # it has sp applied i need non-sp weight for PyUriTwc model
+            # apply inverse of softplus
+            raw_w = torch.log(torch.expm1(w))
+            twc_v2.weights[di, si] = raw_w
+
 def get_neuron_names_from_json():
     """Get neuron names organized by layer from TWC JSON."""
     json_path = Path(__file__).parent.parent / "src" / "twc" / "TWC_fiu.json"
@@ -231,8 +268,10 @@ def _agg_errs(errs):
 
 def save_comparison(out_dir, 
                     ariel_outputs, 
-                    torch_v1_outputs, torch_v2_outputs, # <--- 
-                    output_diffs_v1_array, output_diffs_v2_array, # <--- 
+                    torch_v1_outputs, torch_v2_outputs,
+                    torch_pyuri_v2_outputs,
+                    output_diffs_v1_array, output_diffs_v2_array,
+                    output_diffs_pyuri_v2_array,
                     state_differences_all,
                     neuron_names,
                     twc, 
@@ -341,28 +380,34 @@ def save_comparison(out_dir,
             f.write("TWC Implementation Comparison\n")
             f.write("=" * 80 + "\n\n")
             f.write(f"Number of test cases: {num_tests}\n\n")
-            
-            f.write("Output Statistics (Ariel vs V1 - Precise):\n")
+
+            f.write("Output Statistics (Ariel vs TWC V1 - Precise):\n")
             f.write(f"  Mean difference: {output_diffs_v1_array.mean():.6f}\n")
             f.write(f"  Std difference:  {output_diffs_v1_array.std():.6f}\n")
             f.write(f"  Max difference:  {output_diffs_v1_array.max():.6f}\n")
             f.write(f"  Min difference:  {output_diffs_v1_array.min():.6f}\n\n")
             
-            f.write("Output Statistics (Ariel vs V2 - Differentiable):\n")
+            f.write("Output Statistics (Ariel vs TWC V2 - Differentiable):\n")
             f.write(f"  Mean difference: {output_diffs_v2_array.mean():.6f}\n")
             f.write(f"  Std difference:  {output_diffs_v2_array.std():.6f}\n")
             f.write(f"  Max difference:  {output_diffs_v2_array.max():.6f}\n")
             f.write(f"  Min difference:  {output_diffs_v2_array.min():.6f}\n\n")
             
+            f.write("Output Statistics (Ariel vs PyUri V2 - Differentiable):\n")
+            f.write(f"  Mean difference: {output_diffs_pyuri_v2_array.mean():.6f}\n")
+            f.write(f"  Std difference:  {output_diffs_pyuri_v2_array.std():.6f}\n")
+            f.write(f"  Max difference:  {output_diffs_pyuri_v2_array.max():.6f}\n")
+            f.write(f"  Min difference:  {output_diffs_pyuri_v2_array.min():.6f}\n\n")
+
             if total_state_checks > 0:
-                f.write(f"State Comparison (Ariel vs V1):\n") # <--- 
+                f.write(f"State Comparison (Ariel vs TWC V1):\n")
                 f.write(f"  Total checks: {total_state_checks}\n")
                 f.write(f"  Mismatches: {state_mismatches}\n")
                 f.write(f"  Match rate: {match_rate:.2f}%\n\n")
 
             f.write("-" * 80 + "\n")
             # Order by total mismatches
-            f.write("Per-neuron mismatch summary (Ariel vs V1):\n")
+            f.write("Per-neuron mismatch summary (Ariel vs TWC V1):\n")
             f.write("-" * 80 + "\n")
             for neuron, total in per_neuron_totals:
                 f.write(f"{neuron}: total_mismatches={total}\n")
@@ -374,17 +419,18 @@ def save_comparison(out_dir,
             
             f.write("\nPer-test details:\n")
             f.write("-" * 80 + "\n")
-            for test_idx, (obs, a_out, t_v1_out, t_v2_out, state_diffs) in enumerate(zip(
-                test_observations, ariel_outputs, torch_v1_outputs, torch_v2_outputs, state_differences_all)): # <--- 
+            for test_idx, (obs, a_out, t_v1_out, t_v2_out, pyuri_v2_out, state_diffs) in enumerate(zip(
+                test_observations, ariel_outputs, torch_v1_outputs, torch_v2_outputs, torch_pyuri_v2_outputs, state_differences_all)):
                 f.write(f"\nTest {test_idx + 1}:\n")
                 f.write(f"  Observation: {obs}\n")
-                f.write(f"  Ariel output:     {a_out:.6f}\n")
-                f.write(f"  Torch V1 output:  {t_v1_out:.6f} (Diff: {abs(a_out - t_v1_out):.6f})\n") # <--- 
-                f.write(f"  Torch V2 output:  {t_v2_out:.6f} (Diff: {abs(a_out - t_v2_out):.6f})\n") # <--- 
+                f.write(f"  Ariel output:      {a_out:.6f}\n")
+                f.write(f"  TWC V1 output:     {t_v1_out:.6f} (Diff: {abs(a_out - t_v1_out):.6f})\n")
+                f.write(f"  TWC V2 output:     {t_v2_out:.6f} (Diff: {abs(a_out - t_v2_out):.6f})\n")
+                f.write(f"  PyUri V2 output:   {pyuri_v2_out:.6f} (Diff: {abs(a_out - pyuri_v2_out):.6f})\n")
 
                 has_diff = any(not v['match'] for d in state_diffs.values() if 'error' not in d for k, v in d.items())
                 if has_diff:
-                    f.write(f"  State differences (Ariel vs V1):\n")
+                    f.write(f"  State differences (Ariel vs TWC V1):\n")
                     for name, diffs in state_diffs.items():
                         if 'error' in diffs:
                             f.write(f"    {name}: {diffs['error']}\n")
@@ -440,6 +486,21 @@ def main():
     )
     twc_v2.eval()
     
+    print("Building Fi-Uri TWC V2 (Differentiable)...")
+    #pyuri_twc_v2 = build_fiuri_twc()
+    pyuri_twc_v2 = build_fiuri_twc_v2(steepness_fire=1, 
+                                      steepness_gj=1, 
+                                      steepness_input=1, 
+                                      input_thresh=0, 
+                                      leaky_slope=0.2)
+    pyuri_twc_v2.eval()
+    pyuri_twc_v2.to('cpu')
+    pyuri_twc_v2.device = 'cpu'
+    pyuri_twc_v2.reset(1)
+    
+    twc_v1.to('cpu')
+    twc_v2.to('cpu')
+
     print("Copying state_dict from V1 to V2...")
     twc_v2.load_state_dict(twc_v1.state_dict())
 
@@ -452,6 +513,9 @@ def main():
     print("Synchronizing weights and parameters (Torch V1 -> Ariel)...")
     sync_weights_from_torch_to_ariel(twc_v1, fiu_twc, neuron_names)
     sync_neuron_params_from_torch_to_ariel(twc_v1, fiu_twc, neuron_names)
+    
+    print("Synchronizing weights and parameters (Torch V1 -> Fi-Uri V2)...")
+    sync_parameters(fiu_twc, pyuri_twc_v2)
     
     print("TWC V1 state_dict:", twc_v1.state_dict())
     print("="*40)
@@ -469,10 +533,12 @@ def main():
     # Storage for comparisons
     output_differences_v1 = []
     output_differences_v2 = []
+    output_differences_pyuri_v2 = []
     state_differences_all = []
     ariel_outputs = []
     torch_v1_outputs = []
     torch_v2_outputs = []
+    torch_pyuri_v2_outputs = []
     per_neuron_stats = {}
     
     print(f"\nRunning {num_tests} test cases...")
@@ -485,6 +551,7 @@ def main():
             fiu_twc.Reset()  
             twc_v1.reset_internal_only()
             twc_v2.reset_internal_only()
+            pyuri_twc_v2.reset_internal_only()
 
         # 1. Modelo Ariel
         ariel_output = fiu_twc.Update(obs, mode=None, doLog=False)
@@ -503,17 +570,25 @@ def main():
         with torch.no_grad():
             torch_v2_output = twc_v2(obs_tensor)
         torch_v2_outputs.append(torch_v2_output.squeeze().item())
+        
+        # 4. Modelo Fi-Uri V2 (Diferenciable)
+        with torch.no_grad():
+            pyuri_v2_output = pyuri_twc_v2(obs_tensor)
+        torch_pyuri_v2_outputs.append(pyuri_v2_output.squeeze().item())
 
-        # --- MODIFICADO: Comparar ambos ---
+        # --- MODIFICADO: Comparar todos ---
         output_diff_v1 = abs(ariel_output - torch_v1_outputs[-1])
         output_diff_v2 = abs(ariel_output - torch_v2_outputs[-1])
+        output_diff_pyuri_v2 = abs(ariel_output - torch_pyuri_v2_outputs[-1])
         output_differences_v1.append(output_diff_v1)
         output_differences_v2.append(output_diff_v2)
+        output_differences_pyuri_v2.append(output_diff_pyuri_v2)
 
         print(f"\nTest {test_idx + 1}/{num_tests}: obs={obs}")
-        print(f"  Ariel Output: {ariel_output:.6f}")
-        print(f"  V1 Output:    {torch_v1_outputs[-1]:.6f} (Diff: {output_diff_v1:.6E})")
-        print(f"  V2 Output:    {torch_v2_outputs[-1]:.6f} (Diff: {output_diff_v2:.6E})")
+        print(f"  Ariel Output:      {ariel_output:.6f}")
+        print(f"  TWC V1 Output:     {torch_v1_outputs[-1]:.6f} (Diff: {output_diff_v1:.6E})")
+        print(f"  TWC V2 Output:     {torch_v2_outputs[-1]:.6f} (Diff: {output_diff_v2:.6E})")
+        print(f"  PyUri V2 Output:   {torch_pyuri_v2_outputs[-1]:.6f} (Diff: {output_diff_pyuri_v2:.6E})")
         
         # Compare states
         state_diffs, states_match = compare_states(ariel_states, torch_v1_states, tolerance=1e-4)
@@ -551,19 +626,26 @@ def main():
     print("=" * 80)
     output_diffs_v1_array = np.array(output_differences_v1)
     output_diffs_v2_array = np.array(output_differences_v2)
+    output_diffs_pyuri_v2_array = np.array(output_differences_pyuri_v2)
     
-    print(f"Output differences (Ariel vs V1 - Precise):")
+    print(f"Output differences (Ariel vs TWC V1 - Precise):")
     print(f"  Mean: {output_diffs_v1_array.mean():.6E}")
     print(f"  Std:  {output_diffs_v1_array.std():.6E}")
     print(f"  Max:  {output_diffs_v1_array.max():.6E}")
     print(f"  Min:  {output_diffs_v1_array.min():.6E}")
     
-    print(f"\nOutput differences (Ariel vs V2 - Differentiable):")
+    print(f"\nOutput differences (Ariel vs TWC V2 - Differentiable):")
     print(f"  Mean: {output_diffs_v2_array.mean():.6E}")
     print(f"  Std:  {output_diffs_v2_array.std():.6E}")
     print(f"  Max:  {output_diffs_v2_array.max():.6E}")
     print(f"  Min:  {output_diffs_v2_array.min():.6E}")
     
+    print(f"\nOutput differences (Ariel vs PyUri V2 - Differentiable):")
+    print(f"  Mean: {output_diffs_pyuri_v2_array.mean():.6E}")
+    print(f"  Std:  {output_diffs_pyuri_v2_array.std():.6E}")
+    print(f"  Max:  {output_diffs_pyuri_v2_array.max():.6E}")
+    print(f"  Min:  {output_diffs_pyuri_v2_array.min():.6E}")
+
     # Count state mismatches
     total_state_checks = 0
     state_mismatches = 0
@@ -577,7 +659,7 @@ def main():
     
     if total_state_checks > 0:
         match_rate = (1 - state_mismatches / total_state_checks) * 100
-        print(f"\nState comparison:")
+        print(f"\nState comparison (Ariel vs TWC V1):")
         print(f"  Total checks: {total_state_checks}")
         print(f"  Mismatches: {state_mismatches}")
         print(f"  Match rate: {match_rate:.2f}%")
@@ -597,44 +679,48 @@ def main():
     per_neuron_totals.sort(key=lambda x: x[1], reverse=True)
 
     if per_neuron_totals:
-        print("\nTop per-neuron mismatches:")
+        print("\nTop per-neuron mismatches (Ariel vs TWC V1):")
         for neuron, total in per_neuron_totals[:10]:
             print(f"  {neuron}: {total}")
     
     print("\nGenerating plots...")
     fig, axes = plt.subplots(2, 2, figsize=(14, 10))
-    fig.suptitle("Ariel (Original) vs Torch V1 (Precise) vs Torch V2 (Differentiable)")
+    fig.suptitle("Ariel (Original) vs. Torch Implementations")
     
     # Output comparison
     ax = axes[0, 0]
-    ax.scatter(ariel_outputs, torch_v1_outputs, alpha=0.6, label='Torch V1 (Precise)', s=20)
-    ax.scatter(ariel_outputs, torch_v2_outputs, alpha=0.6, label='Torch V2 (Grads)', s=20)
+    ax.scatter(ariel_outputs, torch_v1_outputs, alpha=0.6, label='TWC V1 (Precise)', s=20)
+    ax.scatter(ariel_outputs, torch_v2_outputs, alpha=0.6, label='TWC V2 (Grads)', s=20)
+    ax.scatter(ariel_outputs, torch_pyuri_v2_outputs, alpha=0.6, label='PyUri V2 (Grads)', s=10, marker='x')
     # Línea y=x
-    min_val = min(min(ariel_outputs), min(torch_v1_outputs), min(torch_v2_outputs)) - 0.1
-    max_val = max(max(ariel_outputs), max(torch_v1_outputs), max(torch_v2_outputs)) + 0.1
+    all_outs = ariel_outputs + torch_v1_outputs + torch_v2_outputs + torch_pyuri_v2_outputs
+    min_val = min(all_outs) - 0.1
+    max_val = max(all_outs) + 0.1
     ax.plot([min_val, max_val], [min_val, max_val], 'r--', label='y=x')
     ax.set_xlabel('Ariel Output')
     ax.set_ylabel('Torch Output')
-    ax.set_title('Output Comparison')
+    ax.set_title('Output Comparison (vs. Ariel)')
     ax.legend()
     ax.grid(True)
     
     # Output differences
     ax = axes[0, 1]
-    ax.plot(output_differences_v1, 'o-', label='V1 (Precise) Diff', markersize=4, alpha=0.7)
-    ax.plot(output_differences_v2, 'o-', label='V2 (Grads) Diff', markersize=4, alpha=0.7)
+    ax.plot(output_differences_v1, 'o-', label='TWC V1 Diff', markersize=3, alpha=0.7)
+    ax.plot(output_differences_v2, 'o-', label='TWC V2 Diff', markersize=3, alpha=0.7)
+    ax.plot(output_differences_pyuri_v2, 'x-', label='PyUri V2 Diff', markersize=3, alpha=0.7)
     ax.set_xlabel('Test Case')
     ax.set_ylabel('Absolute Difference')
-    ax.set_title('Output Differences Over Tests')
+    ax.set_title('Absolute Output Differences from Ariel')
     ax.legend()
     ax.grid(True)
-    ax.set_yscale('log') # <--- MODIFICADO: Log scale para ver ambas diferencias
+    ax.set_yscale('log')
     
     # Output distribution
     ax = axes[1, 0]
     ax.hist(ariel_outputs, alpha=0.5, label='Ariel', bins=20)
-    ax.hist(torch_v1_outputs, alpha=0.5, label='Torch V1', bins=20, histtype='step', linewidth=2)
-    ax.hist(torch_v2_outputs, alpha=0.5, label='Torch V2 (Grads)', bins=20, histtype='step', linewidth=2)
+    ax.hist(torch_v1_outputs, alpha=0.5, label='TWC V1', bins=20, histtype='step', linewidth=2)
+    ax.hist(torch_v2_outputs, alpha=0.5, label='TWC V2', bins=20, histtype='step', linewidth=2)
+    ax.hist(torch_pyuri_v2_outputs, alpha=0.5, label='PyUri V2', bins=20, histtype='step', linewidth=1.5, linestyle='--')
     ax.set_xlabel('Output Value')
     ax.set_ylabel('Frequency')
     ax.set_title('Output Distribution')
@@ -643,14 +729,15 @@ def main():
     
     # Error distribution
     ax = axes[1, 1]
-    ax.hist(output_diffs_v1_array, bins=20, edgecolor='blue', alpha=0.7, label='V1 (Precise) Errors')
-    ax.hist(output_diffs_v2_array, bins=20, edgecolor='orange', alpha=0.7, label='V2 (Grads) Errors')
+    ax.hist(output_diffs_v1_array, bins=20, alpha=0.7, label='TWC V1 Errors')
+    ax.hist(output_diffs_v2_array, bins=20, alpha=0.7, label='TWC V2 Errors')
+    ax.hist(output_diffs_pyuri_v2_array, bins=20, histtype='step', linewidth=2, label='PyUri V2 Errors')
     ax.set_xlabel('Absolute Error')
     ax.set_ylabel('Frequency')
-    ax.set_title('Error Distribution')
+    ax.set_title('Error Distribution (vs. Ariel)')
     ax.legend()
     ax.grid(True)
-    ax.set_yscale('log') # <--- MODIFICADO: Log scale
+    ax.set_yscale('log')
     
     plt.tight_layout(rect=[0, 0.03, 1, 0.95]) # Ajustar para el suptitle
     plt.savefig(os.path.join(out_dir, 'twc_comparison_v1_v2.png'), dpi=150)
@@ -661,8 +748,10 @@ def main():
     save_comparison(
         out_dir,
         ariel_outputs,
-        torch_v1_outputs, torch_v2_outputs,
-        output_diffs_v1_array, output_diffs_v2_array,
+        torch_v1_outputs, torch_v2_outputs, 
+        torch_pyuri_v2_outputs,
+        output_diffs_v1_array, output_diffs_v2_array, 
+        output_diffs_pyuri_v2_array,
         state_differences_all,
         neuron_names,
         twc_v1, # Usamos V1 como referencia para los parámetros

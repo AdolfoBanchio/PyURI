@@ -58,11 +58,6 @@ class OUNoise:
 
         # Decaimiento lineal clásico: sigma = sigma_init → sigma_min
         self.sigma = self.sigma_init - frac * (self.sigma_init - self.sigma_min)
-
-        # Alternativa :
-        # Decaimiento exponencial
-        # self.sigma = self.sigma_min + (self.sigma_init - self.sigma_min) * np.exp(-3 * frac)
-
     # ----------------------------------------------------------
     def noise(self):
         """

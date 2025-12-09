@@ -65,7 +65,6 @@ class TD3Config:
     
     # Buffer
     replay_buffer_size: int = 100_000
-    replay_buffer_keep: int = 20_000 # For sequence buffer
 
     # --- Saving ---
     model_prefix: str = "td3_actor"

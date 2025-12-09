@@ -61,10 +61,8 @@ def objective(trial: optuna.Trial, study_name):
     # Centered around best-known config (20251202 success) with ±30–40% ranges
     cfg.actor_lr = trial.suggest_float("actor_lr", 1.5e-4, 3.0e-4, log=True)      # best ~2.24e-4
     cfg.critic_lr = trial.suggest_float("critic_lr", 1.2e-4, 3.0e-4, log=True)    # best ~1.83e-4
-
     cfg.gamma = trial.suggest_float("gamma", 0.978, 0.990)                        # best ~0.98235
     cfg.tau   = trial.suggest_float("tau", 5e-3, 1.2e-2)                          # best ~0.00769
-
     cfg.target_noise = trial.suggest_float("target_noise", 0.20, 0.36)            # best ~0.284
     cfg.noise_clip   = trial.suggest_float("noise_clip",   0.25, 0.40)            # best ~0.318
     cfg.ou_sigma_init = trial.suggest_float("sigma_start", 0.30, 0.45)            # best ~0.396
