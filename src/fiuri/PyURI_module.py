@@ -31,17 +31,17 @@ def _scatter_add_batched(src_be: torch.Tensor, dst_e: torch.Tensor, out_bn: torc
 class FIURIModule(nn.Module):
     """  
     Nerual layer of the FIURI model. (fully pytorch)
+    Neuron Dynamic equations for a given neuron 'n'
     Sn = En + sum(I_jin) j=1..m where m is ammount of connections(9) 
          
-    Ij in = 
-            ωj * Oj if Oj ≥ En y gap junct. 
-            -ωj * Oj if Oj < En y gap junct. 
-            ωj * Oj chemical excitatory 
-            -ωj * Oj chemical inhibitory
+            ( ωj * Oj if Oj ≥ En y gap junct. 
+    Ij in = ( -ωj * Oj if Oj < En y gap junct.
+            ( ωj * Oj chemical excitatory 
+            ( -ωj * Oj chemical inhibitory
     where Oj is the output state of the presynaptic neuron j and ωj is the weight of the connection from neuron j to neuron n.
     
-    On = ( Sn- Tn if Sn > Tn 
-         ( 0 other case (10) 
+    On = ( Sn - Tn if Sn > Tn 
+         ( 0 other case             (10) 
     
         | Sn - Tn if Sn > Tn
     En =  En - dn if Sn ≤ Tn and Sn = En  (11) 
