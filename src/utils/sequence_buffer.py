@@ -38,27 +38,27 @@ class SequenceBuffer:
             "action": [],
             "reward": [],
             "next_obs": [],
-            "done": [],
+            "terminated": [],
             "truncated": [],
         }
 
-    def store(self, obs: np.ndarray, action: np.ndarray, reward: float, next_obs: np.ndarray, done: bool, truncated: bool):
+    def store(self, obs: np.ndarray, action: np.ndarray, reward: float, next_obs: np.ndarray, terminated: bool, truncated: bool):
         """
-        Stores a single transition. If 'done' or 'truncated' is True,
+        Stores a single transition. If 'terminated' or 'truncated' is True,
         the current episode is "flushed" to the main buffer.
         
-        Note: We use 'done' to mean terminal state, 'truncated' is just
+        Note: We use 'terminated' to mean terminal state, 'truncated' is just
         a time limit, but for sampling, both mark the end of a valid sequence.
         """
         self.current_episode["obs"].append(obs)
         self.current_episode["action"].append(action)
         self.current_episode["reward"].append(np.array([reward])) # Store as (1,)
         self.current_episode["next_obs"].append(next_obs)
-        self.current_episode["done"].append(np.array([done])) # Store as (1,)
+        self.current_episode["terminated"].append(np.array([terminated])) # Store as (1,)
         self.current_episode['truncated'].append(np.array([truncated])) # Store as (1,)
 
-        # An episode ends if it's done (terminal) OR truncated (time limit)
-        if done or truncated:
+        # An episode ends if it's terminated (terminal) OR truncated (time limit)
+        if terminated or truncated:
             self._flush_current_episode()
 
     def _flush_current_episode(self):
@@ -133,7 +133,7 @@ class SequenceBuffer:
             stacked_data = np.stack(data_list) # Shape: (batch_size, sequence_length, *)
             
             # Reshape rewards and dones from (B, L, 1) to (B, L)
-            if key in ['reward', 'done'] and stacked_data.ndim == 3 and stacked_data.shape[2] == 1:
+            if key in ['reward', 'terminated'] and stacked_data.ndim == 3 and stacked_data.shape[2] == 1:
                 stacked_data = stacked_data.reshape(batch_size, sequence_length)
                 
             tensor_batch[key] = torch.tensor(stacked_data, dtype=torch.float32, device=device)

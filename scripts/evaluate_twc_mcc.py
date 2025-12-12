@@ -31,7 +31,7 @@ VIDEOS_DIR = "out/videos"
 
 REPORTS_FILEPATH = "out/reports/twc_td3_reports.csv"
 
-def parse_config(cfg: TD3Config, model_path: Path):
+def parse_config(cfg: TD3Config):
     v2_params = {}
     if cfg.use_v2:
         v2_params = {
@@ -51,10 +51,6 @@ def parse_config(cfg: TD3Config, model_path: Path):
         **v2_params
     )
 
-    state_dict = torch.load(model_path, map_location=DEVICE)
-    actor.load_state_dict(state_dict=state_dict)
-    actor.to(DEVICE)
-    actor.eval()
     return actor
 
 def evaluate_model(env: gym.Env, actor: torch.nn.Module, n_eps: int = DEFAULT_EPISODES):
@@ -248,6 +244,44 @@ def save_twc_plots(twc, out_dir="out/videos"):
         plt.close(fig)
         print(f'Saved {save_path}')
 
+import torch
+
+def load_robust_model(model, model_path, device=None):
+    """
+    Loads a state_dict into a model regardless of whether the saved file 
+    or the current model instance was compiled with torch.compile().
+    """
+    if device is None:
+        try:
+            device = next(model.parameters()).device
+        except StopIteration:
+            device = 'cpu'
+
+    print(f"Loading model from: {model_path}")
+    
+    # 1. Load the state_dict from the file
+    state_dict = torch.load(model_path, map_location=device)
+    
+    # 2. Standardize the State Dict (Remove '_orig_mod.' prefix)
+    clean_state_dict = {}
+    for key, value in state_dict.items():
+        if key.startswith("_orig_mod."):
+            new_key = key.replace("_orig_mod.", "")
+        else:
+            new_key = key
+        clean_state_dict[new_key] = value
+
+    # 4. Load the weights
+    try:
+        model.load_state_dict(clean_state_dict)
+        print("Model loaded successfully.")
+    except RuntimeError as e:
+        print(f"Error loading model: {e}")
+        print("Tip: Check if your model architecture (hidden sizes, layers) matches exactly.")
+        raise e
+
+    return model
+
 def parse_args():
     parser = argparse.ArgumentParser(
         description="Evaluate a MountainCarContinuous policy and export metrics."
@@ -277,7 +311,9 @@ def main():
     
     print(cfg.to_json())
 
-    actor = parse_config(cfg=cfg, model_path=model_path)
+    actor = parse_config(cfg=cfg)
+    actor = load_robust_model(actor, model_path, device=DEVICE)
+    actor.to(DEVICE)
     env = gym.make(ENV)
     env.reset(seed=SEED)
     env.action_space.seed(SEED)

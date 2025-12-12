@@ -62,9 +62,15 @@ class TD3Engine():
         self.total_updates = 0  # for delayed actor
     
     @torch.no_grad()
-    def soft_update(self, net: nn.Module, target_net: nn.Module):
-            for p, tp in zip(net.parameters(), target_net.parameters()):
-                tp.data.mul_(1.0 - self.tau).add_(self.tau * p.data)
+    def soft_update(self, target_net, online_net, tau):
+        # 1. Soft Update Learnable Parameters (Weights/Biases)
+        for target_param, param in zip(target_net.parameters(), online_net.parameters()):
+            target_param.data.copy_(tau * param.data + (1.0 - tau) * target_param.data)
+            
+        # 2. Hard Copy Non-Learnable Buffers (BatchNorm stats)
+        # Buffers (running_mean, running_var) are not "parameters" so they are skipped above.
+        for target_buffer, buffer in zip(target_net.buffers(), online_net.buffers()):
+            target_buffer.data.copy_(buffer.data)
                 
     def get_action(self, state):
         s = torch.as_tensor(state, dtype=torch.float32, device=self.device).unsqueeze(0)
@@ -74,22 +80,6 @@ class TD3Engine():
 
         return torch.clamp(a, self.action_low, self.action_high).squeeze(0)
 
-
-    def set_eval(self):
-        self.actor.eval()
-        self.critic_1.eval()
-        self.critic_2.eval()
-        self.actor_target.eval()
-        self.critic_1_target.eval()
-        self.critic_2_target.eval()
-    
-    def set_train(self):
-        self.actor.train()
-        self.critic_1.train()
-        self.critic_2.train()
-        self.actor_target.train()
-        self.critic_1_target.train()
-        self.critic_2_target.train()
 
     def _detach_state_dict(self, state_dict: dict[str, tuple[torch.Tensor, torch.Tensor]]):
         """
@@ -116,7 +106,7 @@ class TD3Engine():
         act_seq = batch_of_sequences['action'].to(self.device)
         rew_seq = batch_of_sequences['reward'].to(self.device)
         obs2_seq = batch_of_sequences['next_obs'].to(self.device)
-        term_seq = batch_of_sequences['done'].to(self.device) # Use 'done' from buffer
+        term_seq = batch_of_sequences['terminated'].to(self.device)
         
         B, L, _ = obs_seq.shape
         train_length = L - burn_in_length
@@ -229,10 +219,10 @@ class TD3Engine():
             self.actor_optimizer.step()
 
             # Soft update targets
-            self.soft_update(net=self.actor,   target_net=self.actor_target)
-            self.soft_update(net=self.critic_1, target_net=self.critic_1_target)
-            self.soft_update(net=self.critic_2, target_net=self.critic_2_target)
-
+            self.soft_update(online_net=self.actor, target_net=self.actor_target, tau=self.tau)
+            self.soft_update(online_net=self.critic_1, target_net=self.critic_1_target, tau=self.tau)
+            self.soft_update(online_net=self.critic_2, target_net=self.critic_2_target, tau=self.tau)
+            
         if actor_loss is None:
             actor_loss_r = float('nan')
         else:

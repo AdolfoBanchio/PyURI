@@ -2,6 +2,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import json
+import math
 from twc.twc_io import mcc_obs_to_potentials, twc_out_2_mcc_action as canonical_out_decoder
 
 TWC_JSON = {
@@ -135,13 +136,36 @@ class PyUriTwc(nn.Module):
         self.thresholds = nn.Parameter(torch.empty(self.num_neurons))                # Range 0-5
         self.decay = nn.Parameter(torch.empty(self.num_neurons))                     # Range 0-0.5
 
-        nn.init.kaiming_uniform_(self.weights)
+        self.sparse_kaiming_uniform()
         nn.init.uniform_(self.thresholds, 0.0, 1.0)
         nn.init.uniform_(self.decay, 0.0, 0.5)
 
         # State Storage
         self.stored_E = None
         self.stored_O = None
+
+    def sparse_kaiming_uniform(self):
+        """
+        Initializes weights per-neuron based on the actual number of 
+        incoming connections (Effective Fan-In).
+        """
+        # effective Fan-In for each neuron
+        total_mask = self.mask_ex + self.mask_in + self.mask_gj
+        fan_in_counts = total_mask.sum(dim=1)
+
+        fan_in_counts[fan_in_counts == 0] = 1.0
+
+        # 3. Calculate Kaiming Bounds per neuron
+        gain = math.sqrt(5) # Matches PyTorch default for LeakyReLU/Linear
+        bounds = gain * torch.sqrt(3.0 / fan_in_counts)
+
+        with torch.no_grad():
+            # U(-1, 1) generator
+            raw_noise = (torch.rand_like(self.weights) * 2) - 1 
+            
+            # Scale: weights[i, :] *= bounds[i]
+            # Broadcasting: (11, 11) * (11, 1)
+            self.weights.data = raw_noise * bounds.unsqueeze(1)
 
     def set_params_of_name(self, neu_name:str, th, df):
         idx = self.neuron_names[neu_name]
@@ -330,7 +354,6 @@ class PyUriTwc_V2(nn.Module):
                  steepness_fire: float = 10.0,
                  steepness_input: float = 5.0,
                  input_thresh: float = 0.01,
-                 leaky_slope: float = 0.01,
                  device=('cuda' if torch.cuda.is_available() else 'cpu')):
         super().__init__()
         self.device = device
@@ -362,19 +385,19 @@ class PyUriTwc_V2(nn.Module):
         self.input_indices = [self.neuron_names[n] for n in config_json['groups']['input']]
         self.output_indices = [self.neuron_names[n] for n in config_json['groups']['output']]
 
+        # Pre-calculate masks
         mask = torch.zeros(self.num_neurons, device=device, dtype=torch.bool)
         mask[self.input_indices] = True
         self.register_buffer('input_bool_mask', mask)
+        self.register_buffer('input_idx_base', torch.tensor(self.input_indices, device=self.device))
 
         # --- Parameters ---
-        # Legacy Model.py: noiseParam limits weights/thresholds/decay to [0.0, 10.0]
-        # We initialize them in a biologically plausible range for this model
-        self.weights = nn.Parameter(torch.empty(self.num_neurons, self.num_neurons)) # Range 0-5
+        self.weights = nn.Parameter(torch.empty(self.num_neurons, self.num_neurons)) 
         self.thresholds = nn.Parameter(torch.empty(self.num_neurons))                # Range 0-5
         self.decay = nn.Parameter(torch.empty(self.num_neurons))                     # Range 0-0.5
 
-        nn.init.kaiming_uniform_(self.weights)
-        nn.init.uniform_(self.thresholds, 0.0, 1.0)
+        self.sparse_kaiming_uniform()
+        nn.init.uniform_(self.thresholds, 0.0, 0.2)
         nn.init.uniform_(self.decay, 0.0, 0.5)
 
         # surrogate gradients parameters
@@ -382,11 +405,35 @@ class PyUriTwc_V2(nn.Module):
         self.steepness_fire = steepness_fire
         self.steepness_input = steepness_input
         self.input_thresh = input_thresh
-        self.leaky_slope = leaky_slope
 
         # State Storage
         self.stored_E = None
         self.stored_O = None
+
+        self.fast_forward_step = torch.compile(self.forward_step, mode="reduce-overhead")
+
+    def sparse_kaiming_uniform(self):
+        """
+        Initializes weights per-neuron based on the actual number of 
+        incoming connections (Effective Fan-In).
+        """
+        # effective Fan-In for each neuron
+        total_mask = self.mask_ex + self.mask_in + self.mask_gj
+        fan_in_counts = total_mask.sum(dim=1)
+
+        fan_in_counts[fan_in_counts == 0] = 1.0
+
+        # 3. Calculate Kaiming Bounds per neuron
+        gain = math.sqrt(5) # Matches PyTorch default for LeakyReLU/Linear
+        bounds = gain * torch.sqrt(3.0 / fan_in_counts)
+
+        with torch.no_grad():
+            # U(-1, 1) generator
+            raw_noise = (torch.rand_like(self.weights) * 2) - 1 
+            
+            # Scale: weights[i, :] *= bounds[i]
+            # Broadcasting: (11, 11) * (11, 1)
+            self.weights.data = raw_noise * bounds.unsqueeze(1)
 
     def set_params_of_name(self, neu_name:str, th, df):
         idx = self.neuron_names[neu_name]
@@ -437,8 +484,6 @@ class PyUriTwc_V2(nn.Module):
         Replicates Neuron.py: computeVnext exactly.
         """
         # 1. Chemical Synapses
-        # Legacy: currInfluence += W * sourceOut (Ex)
-        # Legacy: currInfluence -= W * sourceOut (In)
         W_pos = F.softplus(self.weights)
         W_chem = W_pos * (self.mask_ex - self.mask_in)
         # (Batch, Src) @ (Dst, Src)^T -> (Batch, Dst)
@@ -451,9 +496,6 @@ class PyUriTwc_V2(nn.Module):
         #   (else 0)
         E_expanded = state_E.unsqueeze(2)           # (B, Dst, 1)
         O_expanded = state_O_hybrid.unsqueeze(1)    # (B, 1, Src)
-        # Direction Logic:
-        # instead of sign, use tanh function for flowing gradients
-        # Note: We use O_expanded - E_expanded to check relation
         diff = O_expanded - E_expanded
         direction = torch.tanh(self.steepness_gj * diff) # returns -1, 0, or 1
         # Influence = W * O_src * direction
@@ -463,29 +505,21 @@ class PyUriTwc_V2(nn.Module):
         # 3. Stimulus Calculation
         # Legacy: currState = internalstate + currInfluence
         curr_state = state_E + I_chem + I_gj 
-
-        # 4. Hard Clamping (Neuron.py)
         curr_state = torch.clamp(curr_state, -10, 10)
 
         # 5. Update Rules (Neuron.py if/elif/else block)
-        # instead of mask cases, will use mask 'gates' to let gradients flow
         # Condition A: Firing
-        # "if currState > self.testThreshold:"
-        # Output = currState - threshold
-        # Internal = currState - threshold
-        O_new = F.leaky_relu(curr_state - self.thresholds, negative_slope=self.leaky_slope)
-        firing_gate = torch.sigmoid(self.steepness_fire * (curr_state - self.thresholds))
-        
+        O_potential = curr_state - self.thresholds
+        O_new = F.relu(O_potential)
+        firing_gate = torch.sigmoid(self.steepness_fire * O_potential)
+
         # Condition B: Decay
-        # "elif currState==self.internalstate:" (Implies Influence was 0)
-        # We use a small epsilon for float equality check
-        diff = torch.abs(state_E - curr_state)
-        #  ~0 if S == E, y ~1 if S != E.
-        # to decide betwen elif/else block for internal state
-        decay_gate = torch.sigmoid(self.steepness_input * (diff - self.input_thresh))
-        
-        val_E_fired = O_new 
+        diff_influence = torch.abs(state_E - curr_state)
+        decay_gate = torch.sigmoid(self.steepness_input * (diff_influence - self.input_thresh))
+
+        val_E_fired = O_potential
         val_E_decay = state_E - self.decay
+        val_E_decay = val_E_decay + 0.01 * (curr_state - state_E)
         val_E_subthresh = curr_state
         
         # Evaluate final E value for nonfiring case using gate
@@ -503,32 +537,20 @@ class PyUriTwc_V2(nn.Module):
         """
         batch_size = obs.shape[0]
 
-        # 1. Encode (New tensor created)
+        # 1. Encode
         input_vals = self.obs_encoder(obs, device=self.device)
              
         # Generate indices tensor
-        idx_tensor = torch.tensor(self.input_indices, 
-                                  device=self.device).unsqueeze(0).expand(batch_size, -1)        
-        # Method: Use scatter to create a "Update Mask" 
-        # Then: Result = Old * (1-Mask) + New * Mask
+        # FIX 1 Usage: Expand the pre-registered buffer
+        idx_tensor = self.input_idx_base.unsqueeze(0).expand(batch_size, -1)        
         
         zeros = torch.zeros_like(state_E)
                 
-        # Optimized Functional Hybrid State:
         # 1. Create a "Input Only" tensor (zeros elsewhere)
         input_layer_state = zeros.scatter(1, idx_tensor, input_vals)
         
-        # 2. Create a "Non-Input Only" tensor (zeros at inputs)
-        # We can use a binary mask for this.
-        if not hasattr(self, 'input_bool_mask'):
-            mask = torch.zeros(self.num_neurons, device=self.device, dtype=torch.bool)
-            mask[self.input_indices] = True
-            self.register_buffer('input_bool_mask', mask)
-        
-        # Logic: 
-        # state_hybrid = state_old * (~mask) + input_vals_scattered
-        
-        # Note: state_O is (B, N). input_bool_mask is (N). Broadcasting works (B, N).
+        # 2. Create a "Non-Input Only" tensor
+        # FIX 2 Usage: Use the pre-registered buffer directly
         non_input_mask = ~self.input_bool_mask
         
         state_O_hybrid = (state_O * non_input_mask) + input_layer_state
@@ -558,10 +580,10 @@ class PyUriTwc_V2(nn.Module):
         if self.stored_E is None or self.stored_E.shape[0] != obs.shape[0]:
             self.reset(obs.shape[0])
             
-        action, (new_E, new_O) = self.forward_step(obs, self.stored_E, self.stored_O)
+        action, (new_E, new_O) = self.fast_forward_step(obs, self.stored_E, self.stored_O)
         
-        self.stored_E = new_E.detach()
-        self.stored_O = new_O.detach()
+        self.stored_E = new_E.detach().clone()
+        self.stored_O = new_O.detach().clone()
         return action
 
     def forward_bptt(self, obs_sequence, initial_state=None):
@@ -574,8 +596,10 @@ class PyUriTwc_V2(nn.Module):
         actions_list = []
         for t in range(T):
             obs_t = obs_sequence[:, t, :]
-            action_t, (E, O) = self.forward_step(obs_t, E, O)
-            actions_list.append(action_t)
+            action_t, (new_E, new_O) = self.fast_forward_step(obs_t, E, O)
+            E = new_E.clone()
+            O = new_O.clone()
+            actions_list.append(action_t.clone())
 
         return torch.stack(actions_list, dim=1), (E, O)
     
@@ -588,12 +612,11 @@ def build_fiuri_twc_v2(steepness_gj,
                        steepness_fire,
                        steepness_input,
                        input_thresh,
-                       leaky_slope):
+                       ):
     return PyUriTwc_V2(config_json=TWC_JSON,
                        obs_encoder=mcc_obs_encoder,
                        action_decoder=twc_out_2_mcc_action,
                        steepness_gj = steepness_gj,
                        steepness_fire = steepness_fire,
                        steepness_input = steepness_input,
-                       input_thresh = input_thresh,
-                       leaky_slope = leaky_slope,)
+                       input_thresh = input_thresh,)

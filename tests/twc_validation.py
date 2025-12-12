@@ -491,8 +491,7 @@ def main():
     pyuri_twc_v2 = build_fiuri_twc_v2(steepness_fire=1, 
                                       steepness_gj=1, 
                                       steepness_input=1, 
-                                      input_thresh=0, 
-                                      leaky_slope=0.2)
+                                      input_thresh=0)
     pyuri_twc_v2.eval()
     pyuri_twc_v2.to('cpu')
     pyuri_twc_v2.device = 'cpu'

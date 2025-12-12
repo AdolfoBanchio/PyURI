@@ -61,14 +61,14 @@ def run_test():
 
     # 2. Init New
     opt = build_fiuri_twc()
-    opt.reset_state(1)
+    opt.reset(1)
     
     opt2 = build_fiuri_twc_v2(steepness_fire=1,
                                   steepness_gj=1,
                                   steepness_input=1,
                                   input_thresh=0,
                                   leaky_slope=0.2)
-    opt2.reset_state(1)
+    opt2.reset(1)
     
     opt2.load_state_dict(opt.state_dict(), strict=False)
 

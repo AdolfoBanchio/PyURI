@@ -22,7 +22,7 @@ from datetime import datetime
 from functools import partial
 from td3 import td3_train
 from utils import OUNoise, SequenceBuffer
-from mlp import BestCritic
+from mlp import BestCritic, TwinCritic
 from fiuri import PyUriTwc_V2, build_fiuri_twc_v2
 
 @dataclass
@@ -106,8 +106,7 @@ class TD3Engine():
                  observation_space: gym.Space,
                  action_space: gym.Space,
                  actor: PyUriTwc_V2,
-                 critic_1: nn.Module,
-                 critic_2: nn.Module,
+                 critic: TwinCritic,
                  actor_optimizer: torch.optim.Optimizer,
                  critic_optimizer: torch.optim.Optimizer,
                  policy_delay: int = 2,
@@ -120,22 +119,18 @@ class TD3Engine():
         self.obs_space = observation_space
         self.act_space = action_space
         self.actor = actor
-        self.critic_1 = critic_1
-        self.critic_2 = critic_2
+        self.critic = critic
         self.actor_target = deepcopy(actor)
-        self.critic_1_target = deepcopy(critic_1)
-        self.critic_2_target = deepcopy(critic_2)
+        self.critic_target = deepcopy(critic)
 
         self.actor_optimizer = actor_optimizer
         self.critic_optimizer = critic_optimizer  # should include both critics' params
         self.device = device
 
         self.actor.to(device)
-        self.critic_1.to(device)
-        self.critic_2.to(device)
+        self.critic.to(device)
         self.actor_target.to(device)
-        self.critic_1_target.to(device)
-        self.critic_2_target.to(device)
+        self.critic_target.to(device)
 
         self.policy_delay = int(policy_delay)
         self.target_policy_noise = float(target_policy_noise)
@@ -148,17 +143,27 @@ class TD3Engine():
         self.total_updates = 0  # for delayed actor
 
         # compile actors
-        """ self.actor.compile(mode="default")
-        self.actor_target.compile(mode="default")
-        self.critic_1.compile(mode="default")
-        self.critic_2.compile(mode="default")
-        self.critic_1_target.compile(mode="default")
-        self.critic_2_target.compile(mode="default") """
+        # Compile Actor
+        # compiling the module handles both forward() and forward_bptt() calls.
+        self.actor = torch.compile(self.actor, mode="default")
+        self.actor_target = torch.compile(self.actor_target, mode="default")
+        
+        # Compile Critics
+        # Critics are standard MLPs. max-autotune helps fuse the LayerNorm + ReLU + Linear pattern.
+        self.critic = torch.compile(self.critic, mode="default")
+        self.critic_target = torch.compile(self.critic_target, mode="default")
+        
     
     @torch.no_grad()
-    def soft_update(self, net: nn.Module, target_net: nn.Module):
-            for p, tp in zip(net.parameters(), target_net.parameters()):
-                tp.data.mul_(1.0 - self.tau).add_(self.tau * p.data)
+    def soft_update(self, target_net, online_net, tau):
+        # 1. Soft Update Learnable Parameters (Weights/Biases)
+        for target_param, param in zip(target_net.parameters(), online_net.parameters()):
+            target_param.data.copy_(tau * param.data + (1.0 - tau) * target_param.data)
+            
+        # 2. Hard Copy Non-Learnable Buffers (BatchNorm stats)
+        # Buffers (running_mean, running_var) are not "parameters" so they are skipped above.
+        for target_buffer, buffer in zip(target_net.buffers(), online_net.buffers()):
+            target_buffer.data.copy_(buffer.data)
                 
     def get_action(self, state):
         # Shape: (1, ObsDim)
@@ -169,22 +174,6 @@ class TD3Engine():
 
         # Clamp using broadcasted shapes, then squeeze to (ActionDim,)
         return torch.clamp(a, self.action_low, self.action_high).squeeze(0)
-    
-    def set_eval(self):
-        self.actor.eval()
-        self.critic_1.eval()
-        self.critic_2.eval()
-        self.actor_target.eval()
-        self.critic_1_target.eval()
-        self.critic_2_target.eval()
-    
-    def set_train(self):
-        self.actor.train()
-        self.critic_1.train()
-        self.critic_2.train()
-        self.actor_target.train()
-        self.critic_1_target.train()
-        self.critic_2_target.train()
 
     def _detach_state_tuple(self, state_tuple):
         """Helper to detach (E, O) tuple from TWC_V2"""
@@ -197,7 +186,7 @@ class TD3Engine():
         next_obs = batch['next_obs'].to(self.device)
         action = batch['action'].to(self.device)
         reward = batch['reward'].to(self.device)
-        done = batch['done'].to(self.device)
+        terminated = batch['terminated'].to(self.device)
         
         B = obs.shape[0]
 
@@ -216,7 +205,7 @@ class TD3Engine():
         next_obs_t = next_obs[:, burn_in:]
         act_t = action[:, burn_in:]
         rew_t = reward[:, burn_in:].unsqueeze(-1)
-        done_t = done[:, burn_in:].unsqueeze(-1)
+        terminated_t = terminated[:, burn_in:].unsqueeze(-1)
 
         # 2. Critic Update
         with torch.no_grad():
@@ -227,23 +216,16 @@ class TD3Engine():
             noise = (torch.randn_like(next_act) * self.target_policy_noise).clamp(-self.target_noise_clip, self.target_noise_clip)
             next_act = (next_act + noise).clamp(self.action_low.unsqueeze(1), self.action_high.unsqueeze(1))            
             # Target Q
-            q1_t = self.critic_1_target(next_obs_t, next_act)
-            q2_t = self.critic_2_target(next_obs_t, next_act)
-            min_q = torch.min(q1_t, q2_t)
-            
-            target_q = rew_t + (1 - done_t) * self.gamma * min_q
+            q1_t, q2_t = self.critic_target(next_obs_t, next_act)
+            min_q = torch.min(q1_t, q2_t)            
+            target_q = rew_t + (1 - terminated_t) * self.gamma * min_q
 
-        q1 = self.critic_1(obs_t, act_t)
-        q2 = self.critic_2(obs_t, act_t)
-        
+        q1, q2 = self.critic(obs_t, act_t)        
         critic_loss = F.mse_loss(q1, target_q) + F.mse_loss(q2, target_q)
 
         self.critic_optimizer.zero_grad()
         critic_loss.backward()
-        torch.nn.utils.clip_grad_norm_(
-            itertools.chain(self.critic_1.parameters(), self.critic_2.parameters()),
-            1.0,
-        )
+        torch.nn.utils.clip_grad_norm_(self.critic.parameters(), 1.0)
         self.critic_optimizer.step()
 
         # 3. Actor Update
@@ -255,7 +237,7 @@ class TD3Engine():
             h_O_detached = h_O.detach()
 
             pi_act, _ = self.actor.forward_bptt(obs_t, (h_E_detached, h_O_detached))
-            actor_loss = -self.critic_1(obs_t, pi_act).mean()
+            actor_loss = -self.critic.q1_forward(obs_t, pi_act).mean()
             
             self.actor_optimizer.zero_grad(set_to_none=True)
             actor_loss.backward()
@@ -263,9 +245,12 @@ class TD3Engine():
             self.actor_optimizer.step()
 
             # Soft update targets
-            self.soft_update(net=self.actor,   target_net=self.actor_target)
-            self.soft_update(net=self.critic_1, target_net=self.critic_1_target)
-            self.soft_update(net=self.critic_2, target_net=self.critic_2_target)
+            self.soft_update(target_net=self.actor_target, 
+                             online_net=self.actor, 
+                             tau=self.tau)
+            self.soft_update(target_net=self.critic_target, 
+                             online_net=self.critic, 
+                             tau=self.tau)
             
             actor_loss_val = actor_loss.item()
             
@@ -289,7 +274,164 @@ class TD3Engine():
                 done = terminated or truncated
         self.actor.train()
         return (total / episodes), np.mean(eval_actions)
+
+
+def td3_train(
+    env: gym.Env,
+    replay_buf: SequenceBuffer,
+    engine: TD3Engine,
+    writer: SummaryWriter,
+    timestamp: str,
+    config: TD3Config,
+    trial: optuna.Trial = None,
+    OUNoise: OUNoise = None,
+):
+    """
+    Main training loop for TD3, adapted to run for a maximum number of time steps.
+    """
+    total_steps = 0
+    best_ret = -np.inf
+    best_model_path = None
+    e = 0  # Episode counter
+
+    # loop variables
+    env_seed = config.seed
+    max_train_steps = config.max_train_steps
+    warmup_steps =  config.warmup_steps
+    num_update_loops = config.num_update_loops
+    update_every_steps = config.update_every
+    batch_size = config.batch_size
+    sequence_length = config.sequence_length
+    device = config.device
+    burn_in_length = config.burn_in_length
+    eval_interval_episodes =  config.eval_interval_episodes
+    eval_episodes =  config.eval_episodes
+    model_prefix = config.model_prefix
+    exp_noise = config.exp_noise
+    action_low  = torch.as_tensor(engine.act_space.low,  device=engine.device, dtype=torch.float32)
+    action_high = torch.as_tensor(engine.act_space.high, device=engine.device, dtype=torch.float32)
+    
+    print(f"working on device: {device}")
+    # Use tqdm to track total steps
+    pbar = tqdm(total=config.max_train_steps, initial=total_steps, desc="Training TD3")
+
+    eval_idx = 0
+    while total_steps < max_train_steps:
+        # New episode
+        obs, _ = env.reset(seed=env_seed)
+        ep_reward = 0.0
+        ep_actions = []
+        steps = 0
+
+        if OUNoise:
+            OUNoise.reset()
+
+        if hasattr(engine.actor, 'reset'):
+            engine.actor.reset()
+            engine.actor_target.reset()
         
+        done = False
+
+        while not done:
+            if total_steps >= max_train_steps:
+                break
+            # Action Selection
+            if total_steps < warmup_steps: 
+                action = env.action_space.sample()
+            else: 
+                """  
+                this get action, makes a forward pass where the actor maintain his own state
+                through all the active training episode. In the update step network internal state
+                is managed differntly to avoid intervinig in the state of the network during
+                the active episode. 
+                """
+                a_det = engine.get_action(obs)
+                
+                if not OUNoise:
+                    noise = torch.randn_like(a_det) * exp_noise
+                else:
+                    OUNoise.update(total_steps=total_steps)
+                    noise = torch.as_tensor(OUNoise.noise(), 
+                                            device=a_det.device,
+                                            dtype=a_det.dtype)
+
+                action = torch.clamp(a_det + noise, action_low, action_high).detach().cpu().numpy()
+
+            # Environment step 
+            obs2, reward, terminated, truncated, _ = env.step(action)
+            done = terminated or truncated
+            
+            ep_reward += reward
+            ep_actions.append(action[0])
+            
+            # Store transition and update step counters 
+            replay_buf.store(obs, action, reward, obs2, terminated, truncated)
+            obs = obs2
+            total_steps += 1
+            steps += 1
+            
+            # Update every X episodes 
+            if total_steps > warmup_steps and (total_steps % update_every_steps == 0):
+                for _ in range(num_update_loops):
+                    seq_batch = replay_buf.sample(batch_size, sequence_length, device)
+                    actor_loss, critic_loss = engine.update_step_bptt(seq_batch, burn_in_length)
+
+                # Log losses every 100 steps to avoid exessive IO
+                if total_steps % 100 == 0:
+                    writer.add_scalar('Loss/Actor', actor_loss, total_steps)
+                    writer.add_scalar('Loss/Critic', critic_loss, total_steps)
+                    if OUNoise:
+                        writer.add_scalar('Training/OUNoise_sigma', OUNoise.sigma, total_steps)
+        
+        pbar.update(steps) # Update the tqdm progress bar
+        
+        if done:
+            # Current ep ended, log middle trainig results
+            writer.add_scalar('Training/Episode_Return', ep_reward, total_steps)
+            writer.add_scalar('Training/Episode_steps', steps, total_steps)
+            if len(ep_actions) > 0:
+                writer.add_scalar('Training/AvgAction', float(np.mean(ep_actions)), total_steps)
+                writer.add_scalar('Training/StdAction', float(np.std(ep_actions)), total_steps)
+            
+            e += 1
+
+            # Evaluation & Optuna Pruning
+            if e % eval_interval_episodes == 0:
+                eval_ret, eval_avg_action = engine.evaluate_policy(env, episodes=eval_episodes)
+                writer.add_scalar('Evaluation/Return', eval_ret, total_steps)
+                writer.add_scalar('Evaluation/AvgAction', eval_avg_action, total_steps)
+                eval_idx += 1
+
+                tqdm.write(f"\nEpisode {e}: TotalSteps: {total_steps}, EvalReturn: {eval_ret:.2f}")
+                
+                if eval_ret > best_ret:
+                    best_ret = eval_ret
+                    prefix = model_prefix
+                    model_path = os.path.join(writer.log_dir, f"{prefix}_best_{timestamp}.pth")
+                    torch.save(engine.actor.state_dict(), model_path)
+                    best_model_path = model_path
+                    tqdm.write(f"New best evaluation reward: {best_ret:.2f}. Model saved to {model_path}")
+                
+                # --- OPTUNA PRUNING LOGIC ---
+                if trial is not None:
+                    # Report current and best-so-far; prune based on best to avoid transient dips
+                    trial.report(eval_ret, step=eval_idx * 2)
+                    trial.report(best_ret, step=eval_idx * 2 + 1) # report best second to be used by prunner. 
+                    if trial.should_prune():
+                        tqdm.write(f"Trial {trial.number} pruned at eval {eval_idx} (episode {e}) with best return {best_ret:.2f}.")
+                        pbar.close()
+                        raise optuna.TrialPruned()
+
+    pbar.close()
+    
+    # --- Final Save ---
+    prefix = f"{model_prefix}_final"
+    model_path = os.path.join(writer.log_dir, f"{prefix}_{timestamp}.pth")            
+    torch.save(engine.actor.state_dict(), model_path)
+    print(f"Final Model saved to {model_path}")           
+    return best_ret, best_model_path
+
+
 def make_env(seed, env_id="MountainCarContinuous-v0"):
     import gymnasium as gym
     env = gym.make(env_id)
@@ -325,25 +467,19 @@ def main(cfg: TD3Config):
         input_thresh=cfg.input_thresh,
         leaky_slope=cfg.leaky_slope,   
     )
-    
-    critic_1 = BestCritic(state_dim=state_dim, action_dim=action_dim)
-    critic_2 = BestCritic(state_dim=state_dim, action_dim=action_dim)
+    critic = TwinCritic(state_dim=state_dim, action_dim=action_dim)
     
     # Optimizers
+    critic_opt = torch.optim.Adam(critic.parameters(), lr=cfg.critic_lr)
     actor_opt = torch.optim.Adam(actor.parameters(),  lr=cfg.actor_lr)
-    critic_opt = torch.optim.Adam(
-        itertools.chain(critic_1.parameters(), critic_2.parameters()),
-        lr=cfg.critic_lr,
-    )
-
+    
     engine = TD3Engine(
         gamma=cfg.gamma,
         tau=cfg.tau,
         observation_space=env.observation_space,
         action_space=env.action_space,
         actor=actor,
-        critic_1=critic_1,
-        critic_2=critic_2,
+        critic=critic,
         actor_optimizer=actor_opt,
         critic_optimizer=critic_opt,
         policy_delay=cfg.policy_delay,
@@ -354,13 +490,13 @@ def main(cfg: TD3Config):
 
     replay_buf = SequenceBuffer(capacity=cfg.replay_buffer_size)
 
-
+    cfg.ou_sigma_decay_steps = cfg.max_train_steps * 0.7
     noise = OUNoise(size=env.action_space.shape,
                        mu=0.0,
                        theta=0.15,
                        sigma_init=cfg.ou_sigma_init,
                        sigma_min=cfg.ou_sigma_end,
-                       decay_steps=cfg.max_train_steps * 0.7,   # 300k
+                       decay_steps=cfg.ou_sigma_decay_steps,   # 300k
                        dt=1.0,
                        seed=cfg.seed
                        )

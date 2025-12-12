@@ -131,7 +131,8 @@ def td3_train(
     exp_noise = config.exp_noise
     action_low  = torch.as_tensor(engine.act_space.low,  device=engine.device, dtype=torch.float32)
     action_high = torch.as_tensor(engine.act_space.high, device=engine.device, dtype=torch.float32)
-
+    
+    print(f"working on device: {device}")
     # Use tqdm to track total steps
     pbar = tqdm(total=config.max_train_steps, initial=total_steps, desc="Training TD3")
 

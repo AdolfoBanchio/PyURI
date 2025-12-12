@@ -316,14 +316,10 @@ class FIURIModuleV2(nn.Module):
         self.threshold = nn.Parameter(torch.empty(num_cells), requires_grad=True) 
         self.decay     = nn.Parameter(torch.empty(num_cells), requires_grad=True)
         
-        if rnd_init:
-            # Match Ariel's RandomSeek init: positive-only draws before training adjusts them
-            nn.init.uniform_(self.threshold, 0.0, 1.0)   # thresholds in [0, 1]
-            nn.init.uniform_(self.decay, 0.0, 0.5)       # decay factors in [0, 0.5]
-        else:
-            nn.init.constant_(self.threshold, initial_threshold)
-            nn.init.constant_(self.decay, initial_decay)
-        
+        # Match Ariel's RandomSeek init: positive-only draws before training adjusts them
+        nn.init.uniform_(self.threshold, 0.0, 1.0)   # thresholds in [0, 1]
+        nn.init.uniform_(self.decay, 0.0, 0.5)       # decay factors in [0, 0.5]
+
         self._init_E = float(initial_in_state)
         self._init_O = float(initial_out_state)
 
