@@ -132,8 +132,8 @@ class SequenceBuffer:
             # Stack all sequences in the batch
             stacked_data = np.stack(data_list) # Shape: (batch_size, sequence_length, *)
             
-            # Reshape rewards and dones from (B, L, 1) to (B, L)
-            if key in ['reward', 'terminated'] and stacked_data.ndim == 3 and stacked_data.shape[2] == 1:
+            # Reshape rewards and done flags from (B, L, 1) to (B, L)
+            if key in ['reward', 'terminated', 'truncated'] and stacked_data.ndim == 3 and stacked_data.shape[2] == 1:
                 stacked_data = stacked_data.reshape(batch_size, sequence_length)
                 
             tensor_batch[key] = torch.tensor(stacked_data, dtype=torch.float32, device=device)

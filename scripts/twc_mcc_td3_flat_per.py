@@ -23,7 +23,7 @@ from functools import partial
 from utils import OUNoise, SequenceBuffer
 from mlp import TwinCritic
 from fiuri import PyUriTwc_V2, build_fiuri_twc_v2, build_fiuri_twc
-from td3_flat import TD3Engine, TD3Config, td3_train
+from td3_flat.td3_flat_per import TD3Engine, TD3Config, td3_train
 
 
 def make_env(seed, env_id="MountainCarContinuous-v0"):
@@ -102,9 +102,9 @@ def main(cfg: TD3Config):
     timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
     run_name = f"twc_mcc_flat_twc_{timestamp}"
     if cfg.use_SG:
-        log_dir = f'out/runs/td3_flat_twc/{run_name}'
+        log_dir = f'out/runs/td3_flat_twc_per/{run_name}'
     else:
-        log_dir = f'out/runs/td3_flat_noSG_twc/{run_name}'
+        log_dir = f'out/runs/td3_flat_noSG_per_twc/{run_name}'
     writer = SummaryWriter(log_dir)
 
     os.makedirs(log_dir, exist_ok=True)

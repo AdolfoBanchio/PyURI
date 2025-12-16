@@ -51,23 +51,31 @@ def sync_parameters(ariel_mod: FiuModel, twc_v2: PyUriTwc):
             conn.setTestWeight(float(sp(twc_v2.weights[di, si])))
 
 def run_test():
-    print("--- Starting Comparison Test ---")
+    # 2. Init New
     device = ('cuda' if torch.cuda.is_available() else 'cpu')
+    opt = build_fiuri_twc()
+    opt.reset(1)
+    opt.to(device=device)
+    opt.device = device
+
+    print("=== Encoder evaluation ===")
+    print("Input [-10, 10] ->", twc_out_2_mcc_action(torch.tensor([[-10.0, 10.0]], dtype=torch.float32)))
+    print("Input [10, -10] ->", twc_out_2_mcc_action(torch.tensor([[10, -10]], dtype=torch.float32)))
+    print("Input [-10, -10] ->", twc_out_2_mcc_action(torch.tensor([[-10, -10]], dtype=torch.float32)))
+    print("Input [10, 10] ->", twc_out_2_mcc_action(torch.tensor([[10, 10]], dtype=torch.float32)))
+    opt.reset(1)
+    print("--- Starting Comparison Test ---")
     # Load ariel model
     xml_path = os.path.join(Path(__file__).parent, 'TWFiuriBaseFIU.xml')
     fiu = FiuModel('FIU')
     fiu.loadFromFile(xml_path)
     fiu.Reset()
 
-    # 2. Init New
-    opt = build_fiuri_twc()
-    opt.reset(1)
     
     opt2 = build_fiuri_twc_v2(steepness_fire=1,
                                   steepness_gj=1,
                                   steepness_input=1,
-                                  input_thresh=0,
-                                  leaky_slope=0.2)
+                                  input_thresh=0,)
     opt2.reset(1)
     
     opt2.load_state_dict(opt.state_dict(), strict=False)
@@ -85,6 +93,10 @@ def run_test():
     hist_leg, hist_new, hist_new2 = [], [], []
     out_dir = os.path.join('out/tests/gpu_validation')
 
+    fwd_idx = opt.neuron_names['FWD']
+    rev_idx = opt.neuron_names['REV']
+    fwd_gt_rev = 0
+    rev_gt_fwd = 0
     # Create output file
     with open(os.path.join(out_dir,"comparison_trace.txt"), "w") as f:
         f.write("STEP | OBS (Pos, Vel) | Action_Leg | Action_New | Diff | Neurons (E_leg, E_new)...\n")
@@ -104,9 +116,18 @@ def run_test():
 
             # --- New Step ---
             obs_t = torch.tensor([[pos, vel]], dtype=torch.float32)
-            act_new = opt(obs_t).item()
-            act_new2 = opt2(obs_t).item()
+            with torch.no_grad():
+                act_new = opt(obs_t).item()
+                act_new2 = opt2(obs_t).item()
             
+            # log if E_fwd > E _rev
+            E_fwd_val = opt.stored_E[0, fwd_idx].item()
+            E_rev_val = opt.stored_E[0, rev_idx].item()
+            if E_fwd_val > E_rev_val:
+                fwd_gt_rev += 1
+            if E_rev_val > E_fwd_val:
+                rev_gt_fwd += 1
+
             # --- Log ---
             hist_leg.append(act_leg)
             hist_new.append(act_new)
@@ -144,6 +165,8 @@ def run_test():
     
     plt.savefig(os.path.join(out_dir,'output_histogram.png'))
     print("Plot saved to output_histogram.png")
+
+    print(f"FWD > REV count: {fwd_gt_rev}, REV > FWD count: {rev_gt_fwd}")
 
 if __name__ == "__main__":
     run_test()

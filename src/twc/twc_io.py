@@ -64,6 +64,7 @@ def mcc_obs_encoder(obs: torch.Tensor, n_inputs=4, device=None):
         (MAX_STATE - MIN_STATE) * cor_pos + MIN_STATE,
         (MAX_STATE - MIN_STATE) * (-cor_pos) + MIN_STATE
     )
+    pos_pot = torch.clamp(pos_pot, MIN_STATE, MAX_STATE)
     PLM_EX_input = torch.where(pos_mask, pos_pot, min_fill)
     AVM_IN_input = torch.where(pos_mask, min_fill, pos_pot)
 
@@ -75,6 +76,8 @@ def mcc_obs_encoder(obs: torch.Tensor, n_inputs=4, device=None):
         (MAX_STATE - MIN_STATE) * cor_vel + MIN_STATE,
         (MAX_STATE - MIN_STATE) * (-cor_vel) + MIN_STATE
     )
+    vel_pot = torch.clamp(vel_pot, MIN_STATE, MAX_STATE)
+
     ALM_EX_input = torch.where(vel_mask, vel_pot, min_fill)
     PVD_IN_input = torch.where(vel_mask, min_fill, vel_pot)
 

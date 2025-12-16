@@ -129,6 +129,11 @@ class PyUriTwc(nn.Module):
         self.input_indices = [self.neuron_names[n] for n in config_json['groups']['input']]
         self.output_indices = [self.neuron_names[n] for n in config_json['groups']['output']]
 
+        mask = torch.zeros(self.num_neurons, device=device, dtype=torch.bool)
+        mask[self.input_indices] = True
+        self.register_buffer('input_bool_mask', mask)
+        self.register_buffer('input_idx_base', torch.tensor(self.input_indices, device=self.device))
+
         # --- Parameters ---
         # Legacy Model.py: noiseParam limits weights/thresholds/decay to [0.0, 10.0]
         # We initialize them in a biologically plausible range for this model
@@ -140,9 +145,23 @@ class PyUriTwc(nn.Module):
         nn.init.uniform_(self.thresholds, 0.0, 1.0)
         nn.init.uniform_(self.decay, 0.0, 0.5)
 
+        fwd_idx = self.neuron_names['FWD']
+        rev_idx = self.neuron_names['REV']
+
+        with torch.no_grad():
+            self.thresholds[fwd_idx].copy_(self.thresholds[rev_idx])
+            self.decay[fwd_idx].copy_(self.decay[rev_idx])
+
+        with torch.no_grad():
+            self.weights[fwd_idx, :].copy_(self.weights[rev_idx, :])
+
         # State Storage
         self.stored_E = None
         self.stored_O = None
+
+        #self.fast_forward_step = torch.compile(self.forward_step, mode="reduce-overhead")
+        self.fast_forward_step = self.forward_step
+
 
     def sparse_kaiming_uniform(self):
         """
@@ -217,8 +236,6 @@ class PyUriTwc(nn.Module):
         Replicates Neuron.py: computeVnext exactly.
         """
         # 1. Chemical Synapses
-        # Legacy: currInfluence += W * sourceOut (Ex)
-        # Legacy: currInfluence -= W * sourceOut (In)
         W_pos = F.softplus(self.weights)
         W_chem = W_pos * (self.mask_ex - self.mask_in)
         # (Batch, Src) @ (Dst, Src)^T -> (Batch, Dst)
@@ -229,16 +246,8 @@ class PyUriTwc(nn.Module):
         #   if sourceOut < internalState: currInfluence -= W * sourceOut
         #   elif sourceOut > internalState: currInfluence += W * sourceOut
         #   (else 0)
-        
         E_expanded = state_E.unsqueeze(2)           # (B, Dst, 1)
         O_expanded = state_O_hybrid.unsqueeze(1)    # (B, 1, Src)
-        
-        # Direction Logic:
-        # +1 if O_src > E_dst
-        # -1 if O_src < E_dst
-        # 0 if O_src == E_dst (Handled by sign)
-        
-        # Note: We use O_expanded - E_expanded to check relation
         diff = O_expanded - E_expanded
         direction = torch.sign(diff) # returns -1, 0, or 1
         
@@ -253,38 +262,27 @@ class PyUriTwc(nn.Module):
         # Note: No external current added here, it was injected via state_O_hybrid clamping
         curr_state = state_E + I_chem + I_gj 
 
-        # 4. Hard Clamping (Neuron.py)
-        # "if currState < -10: ... elif currState > 10: ..."
+        # 4. Clamp internal states
         curr_state = torch.clamp(curr_state, -10, 10)
 
         # 5. Update Rules (Neuron.py if/elif/else block)
-        
         # Condition A: Firing
         # "if currState > self.testThreshold:"
-        # Output = currState - threshold
-        # Internal = currState - threshold
-        firing_mask = curr_state > self.thresholds
-        val_firing = curr_state - self.thresholds
+        O_potential = curr_state - self.thresholds
+        firing_mask = O_potential > 0.0
+        O_new = F.relu(O_potential)
+        val_firing = O_new
         
         # Condition B: Decay
         # "elif currState==self.internalstate:" (Implies Influence was 0)
-        # We use a small epsilon for float equality check
-        net_influence = I_chem + I_gj
         decay_mask = (~firing_mask) & (torch.abs(state_E - curr_state) < 1e-5)
-        
         val_E_decay = state_E - self.decay
-        val_O_decay = torch.zeros_like(state_E) # "self.bufferedOutputState=0"
         
         # Condition C: Accumulation (Sub-threshold active)
-        # "else:"
-        # Internal = currState
-        # Output = 0
         val_E_accum = curr_state
-        val_O_accum = torch.zeros_like(state_E)
 
         # Combine
         E_new = torch.where(firing_mask, val_firing, torch.where(decay_mask, val_E_decay, val_E_accum))
-        O_new = torch.where(firing_mask, val_firing, torch.where(decay_mask, val_O_decay, val_O_accum))
 
         return O_new, E_new
 
@@ -293,40 +291,47 @@ class PyUriTwc(nn.Module):
 
         # 1. Encode
         input_vals = self.obs_encoder(obs, device=self.device)
+             
+        # Generate indices tensor
+        idx_tensor = self.input_idx_base.unsqueeze(0).expand(batch_size, -1)        
+        zeros = torch.zeros_like(state_E)
+        # 1. Create a "Input Only" tensor (zeros elsewhere)
+        input_layer_state = zeros.scatter(1, idx_tensor, input_vals)
         
-        # 2. Hybrid State Construction
-        state_O_hybrid = state_O.clone() 
-        state_O_hybrid[:, self.input_indices] = input_vals
+        # 2. Create a "Non-Input Only" tensor
+        non_input_mask = ~self.input_bool_mask
         
-        state_E_hybrid = state_E.clone()
-        state_E_hybrid[:, self.input_indices] = input_vals
+        state_O_hybrid = (state_O * non_input_mask) + input_layer_state
+        state_E_hybrid = (state_E * non_input_mask) + input_layer_state
 
-        # 3. Physics
-        O_new, E_new = self._physics_step(state_E_hybrid, state_O_hybrid)
+        # 3. Physics (Pure Functional)
+        O_calc, E_calc = self._physics_step(state_E_hybrid, state_O_hybrid)
 
-        # 4. Input Persistence (FIX: Uncommented for exact replication)
-        # Force the inputs to hold their encoded value for the next step's "old state"
-        O_new[:, self.input_indices] = input_vals
-        E_new[:, self.input_indices] = input_vals
+        # 4. Input Persistence (Functional)        
+        O_new = (O_calc * non_input_mask) + input_layer_state
+        E_new = (E_calc * non_input_mask) + input_layer_state
 
         # 5. Decode
         output_neuron_states = E_new[:, self.output_indices]
         action = self.action_decoder(output_neuron_states)
-
+        
         return action, (E_new, O_new)
+
 
     def forward(self, obs):
         """Stateful Forward"""
+        obs = obs.to(self.device, non_blocking=True)
         if self.stored_E is None or self.stored_E.shape[0] != obs.shape[0]:
             self.reset(obs.shape[0])
             
-        action, (new_E, new_O) = self.forward_step(obs, self.stored_E, self.stored_O)
+        action, (new_E, new_O) = self.fast_forward_step(obs, self.stored_E, self.stored_O)
         
-        self.stored_E = new_E.detach()
-        self.stored_O = new_O.detach()
+        self.stored_E = new_E.detach().clone()
+        self.stored_O = new_O.detach().clone()
         return action
 
     def forward_bptt(self, obs_sequence, initial_state=None):
+        obs_sequence = obs_sequence.to(self.device, non_blocking=True)
         B, T, _ = obs_sequence.shape
         if initial_state is None:
             E, O = self.get_initial_state(B, self.device)
@@ -336,8 +341,10 @@ class PyUriTwc(nn.Module):
         actions_list = []
         for t in range(T):
             obs_t = obs_sequence[:, t, :]
-            action_t, (E, O) = self.forward_step(obs_t, E, O)
-            actions_list.append(action_t)
+            action_t, (new_E, new_O) = self.fast_forward_step(obs_t, E, O)
+            E = new_E.clone()
+            O = new_O.clone()
+            actions_list.append(action_t.clone())
 
         return torch.stack(actions_list, dim=1), (E, O)
 
@@ -577,6 +584,7 @@ class PyUriTwc_V2(nn.Module):
 
     def forward(self, obs):
         """Stateful Forward"""
+        obs = obs.to(self.device, non_blocking=True)
         if self.stored_E is None or self.stored_E.shape[0] != obs.shape[0]:
             self.reset(obs.shape[0])
             
@@ -587,6 +595,7 @@ class PyUriTwc_V2(nn.Module):
         return action
 
     def forward_bptt(self, obs_sequence, initial_state=None):
+        obs_sequence = obs_sequence.to(self.device, non_blocking=True)
         B, T, _ = obs_sequence.shape
         if initial_state is None:
             E, O = self.get_initial_state(B, self.device)
