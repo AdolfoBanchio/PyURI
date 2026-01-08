@@ -4,25 +4,17 @@ SRC_ROOT = Path(__file__).resolve().parents[1] / "src"
 if str(SRC_ROOT) not in sys.path:
     sys.path.insert(0, str(SRC_ROOT))
 import os
-import itertools
 import json
 import gymnasium as gym
 import numpy as np
 import torch
-import optuna
-import optunahub
 import argparse
-import ast
-import torch.nn.functional as F
 import torch.nn as nn
-from copy import deepcopy
-from dataclasses import dataclass, asdict
 from torch.utils.tensorboard import SummaryWriter
 from datetime import datetime
-from functools import partial
-from utils import OUNoise, SequenceBuffer
+from utils import SequenceBuffer
 from mlp import TwinCritic
-from fiuri import PyUriTwc_V2, build_fiuri_twc_v2, build_fiuri_twc
+from fiuri import build_fiuri_twc, build_fiuri_twc_v2
 from td3_flat import TD3Engine, TD3Config, td3_train
 
 
@@ -38,13 +30,17 @@ def parse_args():
         description="Train a MCC agent using TD3 and TWC architecture"
     )
     parser.add_argument("config_path", type=str, help="Path to the TD3 Config json")
-
+    parser.add_argument(
+        "--use-sg",
+        action="store_true",
+        help="Enable surrogate gradients (SG)"
+    )
     return parser.parse_args()
 
 
-def main(cfg: TD3Config):
+def main(cfg: TD3Config, use_sg=False):
     # Seed per trial
-    cfg.device = 'cuda' if torch.cuda.is_available() else 'cpu'
+    cfg.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     seed = cfg.seed
     np.random.seed(seed)
     torch.manual_seed(seed)
@@ -54,14 +50,14 @@ def main(cfg: TD3Config):
     state_dim = env.observation_space.shape[0]
     action_dim = env.action_space.shape[0]
 
-    if cfg.use_SG:
-        actor = build_fiuri_twc_v2(
-            steepness_gj=cfg.steepness_gj,
-            steepness_fire=cfg.steepness_fire,
-            steepness_input=cfg.steepness_input,
-            input_thresh=cfg.input_thresh,
-        )
+    if use_sg:
+        actor = build_fiuri_twc_v2(steepness_fire=cfg.steepness_fire,
+                                   steepness_gj=cfg.steepness_gj,
+                                   steepness_input=cfg.steepness_input,
+                                   input_thresh=cfg.input_thresh)
+        dir_name = "td3_flat_twc"
     else:
+        dir_name = "td3_flat_noSG_twc"
         actor = build_fiuri_twc()
         
     critic = TwinCritic(state_dim=state_dim, action_dim=action_dim)
@@ -85,26 +81,12 @@ def main(cfg: TD3Config):
         device=cfg.device,
     )
 
-    replay_buf = SequenceBuffer(capacity=cfg.replay_buffer_size)
-
-    cfg.ou_sigma_decay_steps = cfg.max_train_steps * 0.7
-    noise = OUNoise(size=env.action_space.shape,
-                       mu=0.0,
-                       theta=0.15,
-                       sigma_init=cfg.ou_sigma_init,
-                       sigma_min=cfg.ou_sigma_end,
-                       decay_steps=cfg.ou_sigma_decay_steps,   # 300k
-                       dt=1.0,
-                       seed=cfg.seed
-                       )
+    replay_buf = SequenceBuffer(capacity=cfg.replay_buffer_size, device=cfg.device)
 
     # --- Logging ---
     timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
     run_name = f"twc_mcc_flat_twc_{timestamp}"
-    if cfg.use_SG:
-        log_dir = f'out/runs/td3_flat_twc/{run_name}'
-    else:
-        log_dir = f'out/runs/td3_flat_noSG_twc/{run_name}'
+    log_dir = f'out/runs/{dir_name}/{run_name}'
     writer = SummaryWriter(log_dir)
 
     os.makedirs(log_dir, exist_ok=True)
@@ -121,13 +103,13 @@ def main(cfg: TD3Config):
             writer=writer,
             timestamp=timestamp,
             config=cfg,
-            OUNoise=noise,
         )
 
 
 if __name__ == "__main__":
     args = parse_args()
     config_path = Path(args.config_path)
+    use_sg = args.use_sg
     print(config_path)
     cfg = TD3Config()
     if config_path.exists():
@@ -136,4 +118,4 @@ if __name__ == "__main__":
         cfg = cfg.load(config_data)
 
     print(cfg)
-    main(cfg)
+    main(cfg, use_sg)

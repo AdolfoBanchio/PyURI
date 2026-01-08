@@ -31,8 +31,8 @@ VIDEOS_DIR = "out/videos"
 
 REPORTS_FILEPATH = "out/reports/twc_td3_reports.csv"
 
-def parse_config(cfg: TD3Config):
-    if cfg.use_SG:
+def parse_config(cfg: TD3Config, use_sg=False):
+    if use_sg:
         actor = build_fiuri_twc_v2(steepness_gj=cfg.steepness_gj,
                                    steepness_fire=cfg.steepness_fire,
                                    steepness_input=cfg.steepness_input,
@@ -138,7 +138,7 @@ def write_report(
     metrics: dict,
     model_path: Path,
     reports_filepath: Path,
-    config: TD3Config,
+    use_sg: bool,
     video_path: Optional[str],
 ):
     model_name = model_path.stem
@@ -164,7 +164,7 @@ def write_report(
 
     row = {
         "timestamp": datetime.now(timezone.utc).isoformat(),
-        "version": "SG" if config.use_SG else "OG",
+        "version": "SG" if use_sg else "OG",
         "model_name": model_name,
         "model_path": str(model_path),
         "env": ENV,
@@ -281,6 +281,11 @@ def parse_args():
         help="Directory containing a TD3 configuration (.json) and one or more .pth models.",
     )
 
+    parser.add_argument(
+        "--use-sg",
+        action="store_true",
+        help="Enable surrogate gradients (SG)"
+    )
     return parser.parse_args()
 
 def load_config_from_dir(models_dir: Path) -> TD3Config:
@@ -288,11 +293,19 @@ def load_config_from_dir(models_dir: Path) -> TD3Config:
     json_files = sorted(models_dir.glob("*.json"))
     if not json_files:
         raise FileNotFoundError(f"No .json configuration file found in {models_dir}")
-    if len(json_files) > 1:
-        raise ValueError(f"Multiple .json files found in {models_dir}; please keep only one.")
+
+    if len(json_files) == 1:
+        cfg_file = json_files[0]
+    else:
+        cfg_candidates = [f for f in json_files if "config" in f.stem.lower()]
+        if not cfg_candidates:
+            raise ValueError(f"Config .json file not found in {models_dir}")
+        if len(cfg_candidates) > 1:
+            raise ValueError(f"Multiple config .json files found in {models_dir}: {[f.name for f in cfg_candidates]}")
+        cfg_file = cfg_candidates[0]
 
     cfg = TD3Config()
-    with json_files[0].open("r") as f:
+    with cfg_file.open("r") as f:
         cfg = cfg.load(json.load(f))
     return cfg
 
@@ -302,6 +315,7 @@ def main():
     reports_dir = Path(REPORTS_FILEPATH)
     videos_dir = Path(VIDEOS_DIR)
     models_dir = Path(args.models_dir)
+    use_sg = args.use_sg
 
     if not models_dir.is_dir():
         raise NotADirectoryError(f"{models_dir} is not a directory.")
@@ -314,10 +328,10 @@ def main():
         raise FileNotFoundError(f"No .pth models found in {models_dir}")
 
     for model_path in model_paths:
-        actor = parse_config(cfg=cfg)
+        actor = parse_config(cfg=cfg, use_sg=use_sg)
         actor = load_robust_model(actor, model_path, device=DEVICE)
         actor.to(DEVICE)
-
+        actor.eval()
         env = gym.make(ENV)
         env.reset(seed=SEED)
         env.action_space.seed(SEED)
@@ -327,7 +341,11 @@ def main():
 
         video_path = record_episode(model_path.stem, actor, metrics["best_seed"], videos_dir)
 
-        report_path = write_report(metrics, model_path, reports_dir, cfg, video_path)
+        report_path = write_report(metrics=metrics, 
+                                   model_path=model_path, 
+                                   reports_filepath=reports_dir, 
+                                   use_sg=use_sg, 
+                                   video_path=video_path)
 
         print(
             f"[{model_path.name}] Evaluation finished over {metrics['episodes']} episodes. "

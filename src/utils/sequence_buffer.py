@@ -1,141 +1,71 @@
 import numpy as np
 import torch
-import random
-from collections import deque
 
 class SequenceBuffer:
-    """
-    A replay buffer that stores and samples sequences of transitions for BPTT.
-    
-    This buffer stores entire episodes. When sampling, it pulls a fixed-length
-    sequence from a random episode, ensuring that the sequence never
-    crosses an episode boundary.
-    """
-    
-    def __init__(self, capacity: int):
-        """
-        Args:
-            capacity: The maximum number of *transitions* (not episodes) to store.
-        """
-        # Buffer of episodes. Each episode is a dict of numpy arrays.
-        self.episodes = deque()
-        
+    def __init__(self, capacity: int, device: torch.device):
         self.capacity = int(capacity)
+        self.device = device
+        self.episodes = [] 
         self.total_transitions = 0
-        
-        # Temporary buffer for the episode currently being collected
         self._init_current_episode()
-
-    @property
-    def size(self) -> int:
-        """Returns the total number of transitions stored in the buffer."""
-        return self.total_transitions
 
     def _init_current_episode(self):
-        """Resets the temporary episode buffer."""
-        self.current_episode = {
-            "obs": [],
-            "action": [],
-            "reward": [],
-            "next_obs": [],
-            "terminated": [],
-            "truncated": [],
-        }
+        self.curr_obs = []
+        self.curr_act = []
+        self.curr_rew = []
+        self.curr_nobs = []
+        self.curr_term = []
+        self.curr_trunc = []
 
-    def store(self, obs: np.ndarray, action: np.ndarray, reward: float, next_obs: np.ndarray, terminated: bool, truncated: bool):
-        """
-        Stores a single transition. If 'terminated' or 'truncated' is True,
-        the current episode is "flushed" to the main buffer.
-        
-        Note: We use 'terminated' to mean terminal state, 'truncated' is just
-        a time limit, but for sampling, both mark the end of a valid sequence.
-        """
-        self.current_episode["obs"].append(obs)
-        self.current_episode["action"].append(action)
-        self.current_episode["reward"].append(np.array([reward])) # Store as (1,)
-        self.current_episode["next_obs"].append(next_obs)
-        self.current_episode["terminated"].append(np.array([terminated])) # Store as (1,)
-        self.current_episode['truncated'].append(np.array([truncated])) # Store as (1,)
+    def store(self, obs, action, reward, next_obs, terminated, truncated):
+        self.curr_obs.append(obs)
+        self.curr_act.append(action)
+        self.curr_rew.append(reward)
+        self.curr_nobs.append(next_obs)
+        self.curr_term.append(terminated)
+        self.curr_trunc.append(truncated)
 
-        # An episode ends if it's terminated (terminal) OR truncated (time limit)
         if terminated or truncated:
-            self._flush_current_episode()
+            episode = {
+                "obs": np.array(self.curr_obs, dtype=np.float32),
+                "action": np.array(self.curr_act, dtype=np.float32),
+                "reward": np.array(self.curr_rew, dtype=np.float32).reshape(-1, 1),
+                "next_obs": np.array(self.curr_nobs, dtype=np.float32),
+                "terminated": np.array(self.curr_term, dtype=np.float32).reshape(-1, 1),
+                "truncated": np.array(self.curr_trunc, dtype=np.float32).reshape(-1, 1)
+            }
+            self.episodes.append(episode)
+            self.total_transitions += len(self.curr_obs)
+            self._init_current_episode()
 
-    def _flush_current_episode(self):
-        """
-        Converts the temporary episode buffer (lists) into a
-        dict of numpy arrays and adds it to the main episode deque.
-        """
-        ep_len = len(self.current_episode["obs"])
-        
-        # Don't store empty episodes
-        if ep_len == 0:
-            return
+            while self.total_transitions > self.capacity:
+                old_ep = self.episodes.pop(0)
+                self.total_transitions -= len(old_ep["obs"])
 
-        # Convert all lists to stacked numpy arrays
-        flushed_episode = {}
-        for key in self.current_episode.keys():
-            flushed_episode[key] = np.stack(self.current_episode[key])
-            
-        # Add to the buffer
-        self.episodes.append(flushed_episode)
-        self.total_transitions += ep_len
-        
-        # Evict old episodes if we are over capacity
-        while self.total_transitions > self.capacity:
-            evicted_episode = self.episodes.popleft()
-            self.total_transitions -= len(evicted_episode["obs"])
-            
-        # Reset the temporary buffer
-        self._init_current_episode()
-
-    def sample(self, batch_size: int, sequence_length: int, device: torch.device) -> dict:
-        """
-        Samples a batch of transition sequences for BPTT.
-
-        Args:
-            batch_size: The number of sequences to sample.
-            sequence_length: The length of each sequence (e.g., 40 for burn-in + 40 for train).
-            device: The torch device to send the tensors to.
-
-        Returns:
-            A dictionary of tensors, each with shape (batch_size, sequence_length, *).
-        """
-        
-        # 1. Find all episodes that are long enough to sample from
+    def sample(self, batch_size: int, sequence_length: int):
+        # Filtrar episodios que tengan al menos (sequence_length) transiciones
+        # Optimizamos: solo recalculamos si es estrictamente necesario o usamos un cache
         valid_episodes = [ep for ep in self.episodes if len(ep["obs"]) >= sequence_length]
         
         if not valid_episodes:
-            raise ValueError(f"Not enough data to sample sequences. "
-                             f"Need episodes >= {sequence_length} steps, but found none. "
-                             f"Total transitions: {self.total_transitions}")
+            return None
 
-        batch_seq = {key: [] for key in self.current_episode.keys()}
+        # Pesos para el muestreo: episodios más largos tienen más probabilidad (opcional)
+        lengths = np.array([len(ep["obs"]) - sequence_length + 1 for ep in valid_episodes])
+        probs = lengths / lengths.sum()
 
-        # 2. Sample 'batch_size' sequences
-        for _ in range(batch_size):
-            # Pick a random valid episode
-            ep = random.choice(valid_episodes)
-            
-            # Pick a random valid start index within that episode
-            max_start_idx = len(ep["obs"]) - sequence_length
-            start = np.random.randint(0, max_start_idx + 1)
+        batch = {k: [] for k in ["obs", "action", "reward", "next_obs", "terminated", "truncated"]}
+        
+        sampled_indices = np.random.choice(len(valid_episodes), size=batch_size, p=probs)
+        
+        for idx in sampled_indices:
+            ep = valid_episodes[idx]
+            max_start = len(ep["obs"]) - sequence_length
+            start = np.random.randint(0, max_start + 1)
             end = start + sequence_length
-            
-            # Slice the episode and add to our batch
-            for key in batch_seq.keys():
-                batch_seq[key].append(ep[key][start:end])
 
-        # 3. Stack, convert to tensors, and send to device
-        tensor_batch = {}
-        for key, data_list in batch_seq.items():
-            # Stack all sequences in the batch
-            stacked_data = np.stack(data_list) # Shape: (batch_size, sequence_length, *)
-            
-            # Reshape rewards and done flags from (B, L, 1) to (B, L)
-            if key in ['reward', 'terminated', 'truncated'] and stacked_data.ndim == 3 and stacked_data.shape[2] == 1:
-                stacked_data = stacked_data.reshape(batch_size, sequence_length)
-                
-            tensor_batch[key] = torch.tensor(stacked_data, dtype=torch.float32, device=device)
+            for key in batch.keys():
+                batch[key].append(ep[key][start:end])
 
-        return tensor_batch
+        # Stack y envío a device en una sola operación
+        return {k: torch.as_tensor(np.stack(v), device=self.device) for k, v in batch.items()}

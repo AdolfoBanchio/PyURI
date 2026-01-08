@@ -15,7 +15,8 @@ from twc.twc_io import (
 )
 from ariel.Model import Model as FiuModel
 from ariel import Connection as con
-from fiuri import build_fiuri_twc
+from fiuri import build_fiuri_twc_v2 as build_fiuri_twc
+
 
 def set_all_seeds(seed: int):
     random.seed(seed)

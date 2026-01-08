@@ -43,49 +43,46 @@ def bounded_affine(xmin: float, ymin: float, xmax: float, ymax: float, x: torch.
     y = torch.clamp(y, min=ymin, max=ymax)
     return y
 
-def mcc_obs_encoder(obs: torch.Tensor, n_inputs=4, device=None):
+def mcc_obs_encoder(obs: torch.Tensor, device=None):
     """
-    Encodes observations to input neuron states, exactly matching ariel's BinaryInterface.feedNN().
-    
+    Soporta (B, 2) y (B, T, 2) preservando las dimensiones.
     """
     if device is None:
         device = obs.device
-    pos = obs[:, 0].to(device)
-    vel = obs[:, 1].to(device)
+    
+    # Usamos ellipsis (...) para capturar dimensiones previas (Batch o Batch+Time)
+    pos = obs[..., 0]
+    vel = obs[..., 1]
 
     min_fill = torch.full_like(pos, MIN_STATE, device=device)
     zero = torch.zeros_like(pos, device=device)
 
-    # IN1: Position encoding (matches ariel's IN1 interface)
+    # --- Codificación de Posición (PLM/AVM) ---
     pos_mask = pos >= POS_VALLEY_VAL
-    cor_pos = torch.where(pos_mask, pos / POS_MAX_VAL, pos / (-POS_MIN_VAL))
-    pos_pot = torch.where(
-        pos_mask,
-        (MAX_STATE - MIN_STATE) * cor_pos + MIN_STATE,
-        (MAX_STATE - MIN_STATE) * (-cor_pos) + MIN_STATE
-    )
+    # Evitar división por cero con epsilon
+    cor_pos = torch.where(pos_mask, pos / POS_MAX_VAL, pos / (-POS_MIN_VAL + 1e-8))
+    
+    pos_pot = (MAX_STATE - MIN_STATE) * torch.abs(cor_pos) + MIN_STATE
     pos_pot = torch.clamp(pos_pot, MIN_STATE, MAX_STATE)
+    
     PLM_EX_input = torch.where(pos_mask, pos_pot, min_fill)
     AVM_IN_input = torch.where(pos_mask, min_fill, pos_pot)
 
-    # IN2: Velocity encoding (matches ariel's IN2 interface)
+    # --- Codificación de Velocidad (ALM/PVD) ---
     vel_mask = vel >= VEL_VALLEY_VAL
-    cor_vel = torch.where(vel_mask, vel / VEL_MAX_VAL, vel / (-VEL_MIN_VAL))
-    vel_pot = torch.where(
-        vel_mask,
-        (MAX_STATE - MIN_STATE) * cor_vel + MIN_STATE,
-        (MAX_STATE - MIN_STATE) * (-cor_vel) + MIN_STATE
-    )
+    cor_vel = torch.where(vel_mask, vel / VEL_MAX_VAL, vel / (-VEL_MIN_VAL + 1e-8))
+    
+    vel_pot = (MAX_STATE - MIN_STATE) * torch.abs(cor_vel) + MIN_STATE
     vel_pot = torch.clamp(vel_pot, MIN_STATE, MAX_STATE)
 
     ALM_EX_input = torch.where(vel_mask, vel_pot, min_fill)
     PVD_IN_input = torch.where(vel_mask, min_fill, vel_pot)
 
-    # Stack into channels, input order: [PVD, PLM, AVM, ALM]
-    ex_in = torch.stack([zero, PLM_EX_input, zero, ALM_EX_input], dim=1)
-    in_in = torch.stack([PVD_IN_input, zero, AVM_IN_input, zero], dim=1)
+    # Stack en la última dimensión para mantener (B, 4) o (B, T, 4)
+    ex_in = torch.stack([zero, PLM_EX_input, zero, ALM_EX_input], dim=-1)
+    in_in = torch.stack([PVD_IN_input, zero, AVM_IN_input, zero], dim=-1)
 
-    return ex_in.to(device), in_in.to(device)
+    return ex_in, in_in
 
 def twc_out_2_mcc_action(y: torch.Tensor, fwd_idx: int = 1, rev_idx: int = 0, gain: float = 1.0):
     """

@@ -117,69 +117,54 @@ class TwinCritic(nn.Module):
     def __init__(self, state_dim: int, action_dim: int, hidden_dim: int = 256):
         super().__init__()
         
-        # -----------------------------------
         # Q1 Architecture
-        # -----------------------------------
-        # Affine=False checks: We only want to normalize scale, not shift (often better for RL)
-        self.state_norm1 = nn.BatchNorm1d(state_dim, affine=False, track_running_stats=True)
         self.l1_1 = nn.Linear(state_dim + action_dim, hidden_dim)
         self.ln1_1 = nn.LayerNorm(hidden_dim)
         self.l2_1 = nn.Linear(hidden_dim, hidden_dim)
         self.ln2_1 = nn.LayerNorm(hidden_dim)
         self.l3_1 = nn.Linear(hidden_dim, 1)
 
-        # -----------------------------------
-        # Q2 Architecture 
-        # (Exact replica, separate weights)
-        # -----------------------------------
-        self.state_norm2 = nn.BatchNorm1d(state_dim, affine=False, track_running_stats=True)
+        # Q2 Architecture
         self.l1_2 = nn.Linear(state_dim + action_dim, hidden_dim)
         self.ln1_2 = nn.LayerNorm(hidden_dim)
         self.l2_2 = nn.Linear(hidden_dim, hidden_dim)
         self.ln2_2 = nn.LayerNorm(hidden_dim)
         self.l3_2 = nn.Linear(hidden_dim, 1)
 
-        # Initialize weights using the logic from your original model
         self.apply(self._init_weights)
 
     def _init_weights(self, m):
         if isinstance(m, nn.Linear):
+            # Inicialización ortogonal para RL es excelente
             nn.init.orthogonal_(m.weight, gain=nn.init.calculate_gain('relu'))
             if m.bias is not None:
                 nn.init.zeros_(m.bias)
 
     def forward(self, state, action):
-        """
-        Calculates both Q1 and Q2 in a single forward pass.
-        Best for Critic updates.
-        """
-        # --- Handle 3D Inputs (Batch, Time, Dim) ---
+        # Asegurar que los inputs estén en el mismo device que el Critic
+        device = self.l1_1.weight.device
+        state = state.to(device)
+        action = action.to(device)
+
         is_3d = state.dim() == 3
         if is_3d:
-            B, T, _ = state.shape
-            # Flatten to (B*T, Dim) for standard layers
-            state = state.reshape(-1, state.shape[-1])
-            action = action.reshape(-1, action.shape[-1])
+            B, T, D_s = state.shape
+            _, _, D_a = action.shape
+            state = state.reshape(-1, D_s)
+            action = action.reshape(-1, D_a)
 
-        # -----------------------------------
         # Q1 Forward
-        # -----------------------------------
-        s_norm1 = self.state_norm1(state)
-        x1 = torch.cat([s_norm1, action], dim=1)
+        x1 = torch.cat([state, action], dim=-1)
         x1 = F.relu(self.ln1_1(self.l1_1(x1)))
         x1 = F.relu(self.ln2_1(self.l2_1(x1)))
         q1 = self.l3_1(x1)
 
-        # -----------------------------------
         # Q2 Forward
-        # -----------------------------------
-        s_norm2 = self.state_norm2(state)
-        x2 = torch.cat([s_norm2, action], dim=1)
+        x2 = torch.cat([state, action], dim=-1)
         x2 = F.relu(self.ln1_2(self.l1_2(x2)))
         x2 = F.relu(self.ln2_2(self.l2_2(x2)))
         q2 = self.l3_2(x2)
 
-        # --- Reshape Output if needed ---
         if is_3d:
             q1 = q1.view(B, T, 1)
             q2 = q2.view(B, T, 1)
@@ -187,23 +172,23 @@ class TwinCritic(nn.Module):
         return q1, q2
 
     def q1_forward(self, state, action):
-        """
-        Calculates ONLY Q1.
-        Use this for the Actor update to save 50% compute.
-        """
+        """Versión optimizada para el update del Actor"""
+        device = self.l1_1.weight.device
+        state = state.to(device)
+        action = action.to(device)
+
         is_3d = state.dim() == 3
         if is_3d:
-            B, T, _ = state.shape
-            state = state.reshape(-1, state.shape[-1])
-            action = action.reshape(-1, action.shape[-1])
+            B, T, D_s = state.shape
+            D_a = action.shape[-1]
+            state = state.reshape(-1, D_s)
+            action = action.reshape(-1, D_a)
 
-        s_norm1 = self.state_norm1(state)
-        x1 = torch.cat([s_norm1, action], dim=1)
+        x1 = torch.cat([state, action], dim=-1)
         x1 = F.relu(self.ln1_1(self.l1_1(x1)))
         x1 = F.relu(self.ln2_1(self.l2_1(x1)))
         q1 = self.l3_1(x1)
 
         if is_3d:
             q1 = q1.view(B, T, 1)
-            
         return q1
