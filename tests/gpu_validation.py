@@ -1,6 +1,7 @@
 import sys
 import json
 import math
+import random
 from pathlib import Path
 SRC_ROOT = Path(__file__).resolve().parents[1] / "src"
 if str(SRC_ROOT) not in sys.path:
@@ -20,6 +21,49 @@ from ariel.Model import Model as FiuModel
 from ariel import Connection as con
 from fiuri import PyUriTwc, PyUriTwc_V2, build_fiuri_twc_v2, build_fiuri_twc
 from fiuri.gpu_opt import TWC_JSON as config
+
+
+TWC_JSON = {
+  "neurons": {
+    "PVD": 0, "PLM": 1, "AVM": 2, "ALM": 3,
+    "DVA": 4, "AVD": 5, "PVC": 6, "AVA": 7, "AVB": 8,
+    "REV": 9, "FWD": 10
+  },
+
+  "groups": {
+    "input":  ["PVD", "PLM", "AVM", "ALM"],
+    "hidden": ["DVA", "AVD", "PVC", "AVA", "AVB"],
+    "output": ["REV", "FWD"]
+  },
+  "edges": [
+    { "src": "PVD", "dst": "DVA", "type": "IN"},
+    { "src": "PVD", "dst": "PVC", "type": "IN"},
+    { "src": "PVD", "dst": "AVA", "type": "IN"},
+    { "src": "PLM", "dst": "DVA", "type": "IN"},
+    { "src": "PLM", "dst": "AVD", "type": "IN"},
+    { "src": "PLM", "dst": "AVA", "type": "IN"},
+    { "src": "PLM", "dst": "PVC", "type": "GJ"},
+    { "src": "AVM", "dst": "PVC", "type": "IN"},
+    { "src": "AVM", "dst": "AVD", "type": "GJ"},
+    { "src": "ALM", "dst": "PVC", "type": "IN"},
+    { "src": "ALM", "dst": "AVD", "type": "IN"},
+    { "src": "DVA", "dst": "PVC", "type": "IN"},
+    { "src": "AVD", "dst": "AVA", "type": "EX"},
+    { "src": "AVD", "dst": "AVB", "type": "EX"},
+    { "src": "AVD", "dst": "PVC", "type": "EX"},
+    { "src": "PVC", "dst": "AVB", "type": "EX"},
+    { "src": "PVC", "dst": "AVD", "type": "EX"},
+    { "src": "PVC", "dst": "DVA", "type": "EX"},
+    { "src": "PVC", "dst": "AVA", "type": "EX"},
+    { "src": "AVA", "dst": "AVB", "type": "IN"},
+    { "src": "AVA", "dst": "PVC", "type": "IN"},
+    { "src": "AVA", "dst": "REV", "type": "EX"},
+    { "src": "AVA", "dst": "AVD", "type": "IN"},
+    { "src": "AVB", "dst": "FWD", "type": "EX"},
+    { "src": "AVB", "dst": "AVA", "type": "IN"},
+    { "src": "AVB", "dst": "AVD", "type": "IN"}
+  ]
+}
 
 def sync_parameters(ariel_mod: FiuModel, twc_v2: PyUriTwc):
     """
@@ -71,19 +115,8 @@ def run_test():
     fiu.loadFromFile(xml_path)
     fiu.Reset()
 
-    
-    opt2 = build_fiuri_twc_v2(steepness_fire=1,
-                                  steepness_gj=1,
-                                  steepness_input=1,
-                                  input_thresh=0,)
-    opt2.reset(1)
-    
-    opt2.load_state_dict(opt.state_dict(), strict=False)
-
     opt.to(device=device)
-    opt2.to(device=device)
     opt.device = device
-    opt2.device = device
     # 3. Sync
     sync_parameters(fiu, opt)
     
@@ -92,21 +125,25 @@ def run_test():
     trace = []
     hist_leg, hist_new, hist_new2 = [], [], []
     out_dir = os.path.join('out/tests/gpu_validation')
+    os.makedirs(out_dir, exist_ok=True)
 
     fwd_idx = opt.neuron_names['FWD']
     rev_idx = opt.neuron_names['REV']
     fwd_gt_rev = 0
     rev_gt_fwd = 0
+    all_neuron_names = list(config['neurons'].keys())
+    all_neuron_names.sort(key=lambda n: config['neurons'][n])
+    first_divergence = None
+    divergence_eps = 1e-6
     # Create output file
     with open(os.path.join(out_dir,"comparison_trace.txt"), "w") as f:
-        f.write("STEP | OBS (Pos, Vel) | Action_Leg | Action_New | Diff | Neurons (E_leg, E_new)...\n")
+        f.write("STEP | OBS (Pos, Vel) | Action_Leg | Action_New | Diff | Neurons (E_leg/E_new)...\n")
         
         for i in range(steps):
 
             if i % 5 == 0:
                 fiu.Reset()
                 opt.reset_internal_only()
-                opt2.reset_internal_only()
             # Random Observation
             pos = np.random.uniform(-1.2, 0.6)
             vel = np.random.uniform(-0.07, 0.07)
@@ -118,7 +155,6 @@ def run_test():
             obs_t = torch.tensor([[pos, vel]], dtype=torch.float32)
             with torch.no_grad():
                 act_new = opt(obs_t).item()
-                act_new2 = opt2(obs_t).item()
             
             # log if E_fwd > E _rev
             E_fwd_val = opt.stored_E[0, fwd_idx].item()
@@ -131,18 +167,23 @@ def run_test():
             # --- Log ---
             hist_leg.append(act_leg)
             hist_new.append(act_new)
-            hist_new2.append(act_new2)
             
             diff = abs(act_leg - act_new)
             log_line = f"{i:3} | ({pos:5.2f}, {vel:5.2f}) | {act_leg:6.3f} | {act_new:6.3f} | {diff:6.3e} | "
             
             # Log specific neurons to debug
             neuron_debug = []
-            for name in ["PLM", "AVA", "FWD"]: # Sample check
+            max_neuron_diff = 0.0
+            for name in all_neuron_names:
                 idx = config['neurons'][name]
                 e_leg = fiu.getNeuron(name).internalstate
                 e_new = opt.stored_E[0, idx].item()
-                neuron_debug.append(f"{name}: {e_leg:.1f}/{e_new:.1f}")
+                delta = abs(e_leg - e_new)
+                max_neuron_diff = max(max_neuron_diff, delta)
+                neuron_debug.append(f"{name}: {e_leg:.4f}/{e_new:.4f}")
+
+            if first_divergence is None and max_neuron_diff > divergence_eps:
+                first_divergence = (i, max_neuron_diff)
             
             f.write(log_line + " | ".join(neuron_debug) + "\n")
 
@@ -159,7 +200,6 @@ def run_test():
     plt.subplot(1, 2, 2)
     plt.hist(hist_leg, alpha=0.5, label='Legacy', bins=20)
     plt.hist(hist_new, alpha=0.5, label='Flat Version', bins=20, histtype='step', linewidth=2)
-    plt.hist(hist_new2, alpha=0.5, label='Flat Version (SG)', bins=20, histtype='step', linewidth=2)
     plt.title("Action Histogram")
     plt.legend()
     
@@ -167,6 +207,10 @@ def run_test():
     print("Plot saved to output_histogram.png")
 
     print(f"FWD > REV count: {fwd_gt_rev}, REV > FWD count: {rev_gt_fwd}")
+    if first_divergence is None:
+        print("No neuron divergence detected above eps.")
+    else:
+        print(f"First neuron divergence at step {first_divergence[0]} (max diff {first_divergence[1]:.3e})")
 
 if __name__ == "__main__":
     run_test()

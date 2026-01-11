@@ -57,26 +57,23 @@ def mcc_obs_encoder(obs: torch.Tensor, device=None):
     min_fill = torch.full_like(pos, MIN_STATE, device=device)
     zero = torch.zeros_like(pos, device=device)
 
-    # --- Codificación de Posición (PLM/AVM) ---
+    # --- Codificacion de Posicion (PLM/AVM) ---
     pos_mask = pos >= POS_VALLEY_VAL
-    # Evitar división por cero con epsilon
-    cor_pos = torch.where(pos_mask, pos / POS_MAX_VAL, pos / (-POS_MIN_VAL + 1e-8))
-    
-    pos_pot = (MAX_STATE - MIN_STATE) * torch.abs(cor_pos) + MIN_STATE
-    pos_pot = torch.clamp(pos_pot, MIN_STATE, MAX_STATE)
-    
-    PLM_EX_input = torch.where(pos_mask, pos_pot, min_fill)
-    AVM_IN_input = torch.where(pos_mask, min_fill, pos_pot)
+    cor_pos = torch.where(pos_mask, pos / POS_MAX_VAL, pos / (-POS_MIN_VAL))
+    pos_pot = (MAX_STATE - MIN_STATE) * cor_pos + MIN_STATE
+    neg_pos_pot = (MAX_STATE - MIN_STATE) * (-cor_pos) + MIN_STATE
 
-    # --- Codificación de Velocidad (ALM/PVD) ---
+    PLM_EX_input = torch.where(pos_mask, pos_pot, min_fill)
+    AVM_IN_input = torch.where(pos_mask, min_fill, neg_pos_pot)
+
+    # --- Codificacion de Velocidad (ALM/PVD) ---
     vel_mask = vel >= VEL_VALLEY_VAL
-    cor_vel = torch.where(vel_mask, vel / VEL_MAX_VAL, vel / (-VEL_MIN_VAL + 1e-8))
-    
-    vel_pot = (MAX_STATE - MIN_STATE) * torch.abs(cor_vel) + MIN_STATE
-    vel_pot = torch.clamp(vel_pot, MIN_STATE, MAX_STATE)
+    cor_vel = torch.where(vel_mask, vel / VEL_MAX_VAL, vel / (-VEL_MIN_VAL))
+    vel_pot = (MAX_STATE - MIN_STATE) * cor_vel + MIN_STATE
+    neg_vel_pot = (MAX_STATE - MIN_STATE) * (-cor_vel) + MIN_STATE
 
     ALM_EX_input = torch.where(vel_mask, vel_pot, min_fill)
-    PVD_IN_input = torch.where(vel_mask, min_fill, vel_pot)
+    PVD_IN_input = torch.where(vel_mask, min_fill, neg_vel_pot)
 
     # Stack en la última dimensión para mantener (B, 4) o (B, T, 4)
     ex_in = torch.stack([zero, PLM_EX_input, zero, ALM_EX_input], dim=-1)
