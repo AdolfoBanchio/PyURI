@@ -12,7 +12,6 @@ import torch
 import torch.functional as F
 import numpy as np
 import gymnasium as gym
-from twc.twc_builder import build_twc, TWC
 from twc.twc_io import (
     mcc_obs_encoder,
     twc_out_2_mcc_action,
@@ -124,7 +123,7 @@ def run_test():
     steps = 1000
     trace = []
     hist_leg, hist_new, hist_new2 = [], [], []
-    out_dir = os.path.join('out/tests/gpu_validation')
+    out_dir = os.path.join('out/tests/twc_validation')
     os.makedirs(out_dir, exist_ok=True)
 
     fwd_idx = opt.neuron_names['FWD']

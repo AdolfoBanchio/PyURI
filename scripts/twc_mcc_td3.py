@@ -55,9 +55,9 @@ def main(cfg: TD3Config, use_sg=False):
                                    steepness_gj=cfg.steepness_gj,
                                    steepness_input=cfg.steepness_input,
                                    input_thresh=cfg.input_thresh)
-        dir_name = "td3_flat_twc"
+        dir_name = "td3_mcc_twc_SG"
     else:
-        dir_name = "td3_flat_noSG_twc"
+        dir_name = "td3_mcc_twc"
         actor = build_fiuri_twc()
         
     critic = TwinCritic(state_dim=state_dim, action_dim=action_dim)
@@ -85,7 +85,7 @@ def main(cfg: TD3Config, use_sg=False):
 
     # --- Logging ---
     timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
-    run_name = f"twc_mcc_flat_twc_{timestamp}"
+    run_name = f"twc_mcc_twc_{timestamp}"
     log_dir = f'out/runs/{dir_name}/{run_name}'
     writer = SummaryWriter(log_dir)
 
