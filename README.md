@@ -14,11 +14,28 @@ Se desarrollo un test que compara los valores de salida entre la implementacion 
 ```
 python3 tests/twc_validation.py
 ```
+### Scripts de entrenamiento
 
-Esto guardara los resultados del test en out/tests/twc_validation.
+- Para entrenar el TWC+Fiuri utilizando TD3 en el entorno MCC se puede ejecutar el siguiente comando: 
 
-**Decisiones de diseño tomadas a la hora te integrar TWC en pytorch:**
+```
+python3 scripts/twc_mcc_td3.py <ruta a config.json>
+```
 
-El TWC esta implementado dentro del modulo twc. En twc_builder.py se enceuntra la calse TWC que define el modulo de pytorch con la estructura del TWC. La estructura tiene dos "modos" de ejecicion. Uno donde el estado es manejado por si mismo y de manera interna, y otro donde el estado es manejado externamente y se le pasa como parametro. Esto es necesario para poder realizar entrenamiento haciendo uso de BPTT y TD3.
+Donde el archivo .json debe contener los campos de configuracion de hiperparametros para el entrenamiento con TD3. Siguiendo la clase TD3Config definida en src/td3_flat/td3_flat.py
 
-Ya que durante el entrenamiento tenemos un episodio activo, donde nuestro agente va realizando acciones y recibiendo observaciones del entorno aqui es donde queremos que el estado se conserve a lo largo de la ejecucion del episodio, pero ademas en cada paso de tiempo queremos poder realizar un paso de actualizacion utilizando BPTT, que requiere de correr el modelo por una secuencia de largo (BURN_IN + SEQ_LEN) y luego calcular los gradientes y realizar backpropagation. Lo ideal es que esta secuencia no nos interrumpa el estado interno generado por la red en el episodio activo. Por lo tanto en este paso se utiliza el modo donde el estado es manejado externamente.
+Para comenzar la busqueda de hiperparametros con optuna se debe correr el siguiente comando:
+
+Ahora mismo este script busca resolver el MCC y encola 5 configuraciones de "calentamiento" para el pruner de optuna.
+
+```
+python3 scripts/twc_mcc_td3_optuna.py
+```
+
+Para evaluar los modelos obtenidos luego de un entrenamiento:
+
+```
+python3 scripts/evaluate_twc_mcc.py <ruta a carpeta creada de la corrida>
+```
+
+Dicha ruta se genera en el directorio out/runs/td3_mcc_twc.
