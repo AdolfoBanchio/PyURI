@@ -6,6 +6,7 @@ out/videos
 out/reports
 reports/
 tests/
+*.sqlite3
 
 .python-version
 .github/

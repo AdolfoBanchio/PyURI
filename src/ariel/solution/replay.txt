@@ -1,0 +1,2 @@
+Mean Reward, varianza, desv standar, mean Steps,  steps varianza, steps desv standar, min steps, steps median : 
+[93.8306941168821, 0.49619431880352, 0.7044106180371786, 122.92, 33.2636, 5.7674604463316435, 116, 122.0]

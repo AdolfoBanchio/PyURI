@@ -1,0 +1,12 @@
+model=CP2172
+environment=MouCarCon
+optimizer=RandomSeek
+batch=10
+worst=5
+steps=5000
+gamma=1.0
+cmd=optimize
+folder=all
+fitnes=reward
+batch mode=worst
+steps=5000
