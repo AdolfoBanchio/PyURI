@@ -219,14 +219,15 @@ class TD3Engine:
         return actor_loss_val, critic_loss.item()
 
     @torch.no_grad()
-    def evaluate_policy(self, env, episodes: int):
+    def evaluate_policy(self, env, episodes: int, invert: bool = False):
         """
+        if invert=false, el episodio se considera exitoso si termina por 'terminated' flag (ej: mountian car llego a la meta (exito), iverted pendulum se cayó (fracaso))
+        else, el episodio se considera exitoso solo si termina por truncated (ej: inverted pendulum no se cae)
         Evaluación extendida:
         - mean_return
         - success_rate (terminated=True)
         - avg_steps_success, median_steps_success (solo éxitos)
-        - mean_action, mean_abs_action
-        - pct_near_zero_action: fracción de acciones con |a| < eps
+        - mean_action
         """
         self.actor.eval()
 
@@ -254,8 +255,11 @@ class TD3Engine:
                 ep_steps += 1
                 done = bool(terminated or truncated)
 
-                if terminated:
-                    ep_success = 1
+            # finalizo el episodio, decidimos si con exito o no.
+            if invert:
+                ep_success = 1 if truncated else 0
+            else:                
+                ep_success = 1 if terminated else 0
 
             returns.append(ep_ret)
             successes.append(ep_success)
@@ -285,18 +289,6 @@ class TD3Engine:
         }
         return metrics
 
-
-# ------------------------------------------------------------
-# Helpers: shaping and eval scoring
-# ------------------------------------------------------------
-
-def phi(obs):
-    # Potential shaping (pos only). Keeps your original behavior.
-    pos = obs[0]
-    pos_min, pos_max = -1.2, 0.6
-    x = (pos - pos_min) / (pos_max - pos_min)
-    return 4 * float(np.clip(x, 0.0, 1.0))
-
 # ------------------------------------------------------------
 # Training loop
 # ------------------------------------------------------------
@@ -308,7 +300,11 @@ def td3_train(
     writer: SummaryWriter,
     timestamp: str,
     config: TD3Config,
-    trial=None,
+    trial = None,
+    phi = lambda obs: 0.0,
+    model_score_fn = lambda m_ret, s_rate, s_suc, m_act, all_scores, all_steps: m_ret,  # default: score = return
+    log_interval: int = 100,
+    invert_eval: bool = False,
 ):
     total_steps = 0
     e = 0  # episodes
@@ -323,6 +319,7 @@ def td3_train(
     all_eval_scores = []
     all_eval_steps = []
     ou_noise = OUNoise(env.action_space.shape[0], config)
+    actor_loss, critic_loss = None, None
     # initial model save
     initial_path = os.path.join(writer.log_dir, f"{config.model_prefix}_first_{timestamp}.pth")
     torch.save(engine.actor.state_dict(), initial_path)
@@ -369,14 +366,13 @@ def td3_train(
             total_steps += 1
             steps += 1
 
-            if total_steps > config.warmup_steps and (total_steps % config.update_every == 0):
+            if total_steps > config.warmup_steps :
                 if replay_buf.total_transitions > config.batch_size * 2: 
                     for _ in range(config.num_update_loops):
                         seq_batch = replay_buf.sample(config.batch_size, config.sequence_length)
                         if seq_batch is not None:
-                            actor_loss, critic_loss = engine.update_step_bptt(seq_batch, config.burn_in_length)
-                
-                if total_steps % 100 == 0:
+                            actor_loss, critic_loss = engine.update_step_bptt(seq_batch, config.burn_in_length)    
+                if total_steps % log_interval == 0 and actor_loss is not None:
                     writer.add_scalar("Loss/Actor", actor_loss, total_steps)
                     writer.add_scalar("Loss/Critic", critic_loss, total_steps)
                     writer.add_scalar("Training/OUNoise_sigma", ou_noise.sigma, total_steps)
@@ -395,7 +391,7 @@ def td3_train(
 
         # evaluation
         if e % config.eval_interval_episodes == 0:
-            metrics = engine.evaluate_policy(env, episodes=config.eval_episodes)
+            metrics = engine.evaluate_policy(env, episodes=config.eval_episodes, invert=invert_eval)
 
             eval_ret = metrics["mean_return"]
             success_rate = metrics["success_rate"]
@@ -405,39 +401,21 @@ def td3_train(
             # log metrics
             writer.add_scalar("Evaluation/Return", eval_ret, total_steps)
             writer.add_scalar("Evaluation/SuccessRate", success_rate, total_steps)
-
             # steps can be inf: log a capped value to keep TB sane
             writer.add_scalar(
                 "Evaluation/AvgStepsSuccess",
                 float(avg_steps_success if np.isfinite(avg_steps_success) else 1e3),
                 total_steps,
             )
-
             writer.add_scalar("Evaluation/MeanAction", mean_action, total_steps)
-
-            tqdm.write(
-                f"\nEpisode {e} | Steps {total_steps} | "
-                f"Ret {eval_ret:.2f} | Succ {100*success_rate:.1f}% | "
-                f"AvgStepsSucc {avg_steps_success if np.isfinite(avg_steps_success) else -1:.1f} | "
-            )
 
             all_eval_scores.append(eval_ret)
             all_eval_steps.append(avg_steps_success)
 
-
-             
-            # Calculamos las medias de la ventana (6)
-            window_rew = np.mean(all_eval_scores[-6:])
-            # Si avg_steps es inf (no llegó), le asignamos el máximo del entorno (1000)
-            clean_steps = [s if np.isfinite(s) else 1000 for s in all_eval_steps[-6:]]
-            window_steps = np.mean(clean_steps)
-
-            step_penalty = max(0, (window_steps - 200) * 0.1)
-            current_combined_score = window_rew - step_penalty
-
+            model_score = model_score_fn(eval_ret, success_rate, avg_steps_success, mean_action, all_eval_scores, all_eval_steps)
             # best 
-            if current_combined_score > best_combined_score:
-                best_combined_score = current_combined_score
+            if model_score > best_combined_score:
+                best_combined_score = model_score
                 path = os.path.join(writer.log_dir, f"{config.model_prefix}_best_{timestamp}.pth")
                 torch.save(engine.actor.state_dict(), path)
                 best_model_path = path
@@ -449,7 +427,7 @@ def td3_train(
                 if trial.should_prune():
                     tqdm.write(
                         f"Trial {trial.number} pruned at eval {eval_idx} "
-                        f"(episode {e}) best_score={current_combined_score:.1f} rolling={window_rew:.1f}"
+                        f"(episode {e}) best_score={model_score:.1f}"
                     )
                     pbar.close()
                     raise optuna.TrialPruned()

@@ -9,82 +9,55 @@ import gymnasium as gym
 import numpy as np
 import torch
 import argparse
-import torch.nn as nn
 from torch.utils.tensorboard import SummaryWriter
 from datetime import datetime
 from utils import SequenceBuffer
-from mlp import TwinCritic
-from fiuri import build_fiuri_twc_mcc
+from mlp import TwinCriticInvPen
+from fiuri import build_fiuri_twc_invpen
 from td3_flat import TD3Engine, TD3Config, td3_train
 
 
-def make_env(seed, env_id="MountainCarContinuous-v0"):
-    import gymnasium as gym
+def make_env(seed, env_id="InvertedPendulum-v5"):
     env = gym.make(env_id)
     env.reset(seed=seed)
     env.action_space.seed(seed)
     return env
 
+
 def parse_args():
     parser = argparse.ArgumentParser(
-        description="Train a MCC agent using TD3 and TWC architecture"
+        description="Train an InvertedPendulum-v5 agent using TD3 and TWC architecture"
     )
     parser.add_argument("config_path", type=str, help="Path to the TD3 Config json")
-    parser.add_argument(
-        "--use-sg",
-        action="store_true",
-        help="Enable surrogate gradients (SG)"
-    )
     return parser.parse_args()
 
 
 # ------------------------------------------------------------
-# Helpers: shaping and eval scoring
+# Reward shaping: angle-only (pole upright = high phi)
 # ------------------------------------------------------------
 
-def phi_mcc(obs):
-    # Potential shaping (pos only). Keeps your original behavior.
-    pos = obs[0]
-    pos_min, pos_max = -1.2, 0.6
-    x = (pos - pos_min) / (pos_max - pos_min)
-    return 4 * float(np.clip(x, 0.0, 1.0))
+def phi_invpen(obs):
+    angle = obs[1]
+    return float(1.0 - min(abs(angle) / 0.2, 1.0))
 
-def mcc_score_fn(m_ret, s_rate, s_suc, m_act, all_scores, all_steps):
-    # Calculamos las medias de la ventana (6)
-        window_rew = np.mean(all_scores[-6:])
-        # Si avg_steps es inf (no llegó), le asignamos el máximo del entorno (1000)
-        clean_steps = [s if np.isfinite(s) else 1000 for s in all_steps[-6:]]
-        window_steps = np.mean(clean_steps)
 
-        step_penalty = max(0, (window_steps - 200) * 0.1)
-        current_combined_score = window_rew - step_penalty
-
-        return current_combined_score
-
-def main(cfg: TD3Config, use_sg=False):
-    # Seed per trial
+def main(cfg: TD3Config):
     cfg.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     seed = cfg.seed
     np.random.seed(seed)
     torch.manual_seed(seed)
     env = make_env(seed)
-    
-    # Build models per trial to avoid cross-trial state leakage
+
     state_dim = env.observation_space.shape[0]
     action_dim = env.action_space.shape[0]
 
-    if use_sg:
-        raise NotImplementedError("SG not implemented")
-    else:
-        dir_name = "td3_mcc_twc"
-        actor = build_fiuri_twc_mcc()
-        
-    critic = TwinCritic(state_dim=state_dim, action_dim=action_dim)
-    
-    # Optimizers
+    dir_name = "td3_invpen_twc"
+    actor = build_fiuri_twc_invpen()
+    critic = TwinCriticInvPen(state_dim=state_dim, action_dim=action_dim)
+
     critic_opt = torch.optim.Adam(critic.parameters(), lr=cfg.critic_lr)
     actor_opt = torch.optim.Adam(actor.parameters(),  lr=cfg.actor_lr)
-    
+
     engine = TD3Engine(
         gamma=cfg.gamma,
         tau=cfg.tau,
@@ -102,42 +75,38 @@ def main(cfg: TD3Config, use_sg=False):
 
     replay_buf = SequenceBuffer(capacity=cfg.replay_buffer_size, device=cfg.device)
 
-    # --- Logging ---
     timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
-    run_name = f"twc_mcc_twc_{timestamp}"
+    run_name = f"twc_invpen_twc_{timestamp}"
     log_dir = f'out/runs/{dir_name}/{run_name}'
     writer = SummaryWriter(log_dir)
-
     os.makedirs(log_dir, exist_ok=True)
-        
+
     config_path = os.path.join(log_dir, "full_config.json")
     with open(config_path, "w") as f:
         f.write(cfg.to_json())
-    
-    # Trains, saves best and final models. 
+
+    # Default model_score_fn (mean return) per spec — do not pass model_score_fn.
     td3_train(
-            env=env,
-            replay_buf=replay_buf,
-            engine=engine,
-            writer=writer,
-            timestamp=timestamp,
-            config=cfg,
-            phi=phi_mcc,
-            model_score_fn=mcc_score_fn,
-            log_interval=200
-        )
+        env=env,
+        replay_buf=replay_buf,
+        engine=engine,
+        writer=writer,
+        timestamp=timestamp,
+        config=cfg,
+        phi=phi_invpen,
+        log_interval=200,
+    )
 
 
 if __name__ == "__main__":
     args = parse_args()
     config_path = Path(args.config_path)
-    use_sg = args.use_sg
     print(config_path)
     cfg = TD3Config()
     if config_path.exists():
         with open(config_path, 'r') as f:
-            config_data =  json.load(f)
+            config_data = json.load(f)
         cfg = cfg.load(config_data)
 
     print(cfg)
-    main(cfg, use_sg)
+    main(cfg)

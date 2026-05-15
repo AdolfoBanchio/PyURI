@@ -17,7 +17,7 @@ if str(SRC_ROOT) not in sys.path:
     sys.path.insert(0, str(SRC_ROOT))
 
 from mlp import Actor
-from fiuri import build_fiuri_twc, build_fiuri_twc_v2
+from fiuri import build_fiuri_twc_mcc
 from td3_flat import TD3Config
 
 ENV = "MountainCarContinuous-v0"
@@ -33,12 +33,9 @@ REPORTS_FILEPATH = "out/reports/twc_td3_reports.csv"
 
 def parse_config(cfg: TD3Config, use_sg=False):
     if use_sg:
-        actor = build_fiuri_twc_v2(steepness_gj=cfg.steepness_gj,
-                                   steepness_fire=cfg.steepness_fire,
-                                   steepness_input=cfg.steepness_input,
-                                   input_thresh=cfg.input_thresh)
+        raise NotImplementedError("SG not implented")
     else:
-        actor = build_fiuri_twc()
+        actor = build_fiuri_twc_mcc()
 
     return actor
 

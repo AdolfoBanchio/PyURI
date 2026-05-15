@@ -1,14 +1,12 @@
-"""
-FIURI neural module building blocks.
-"""
-
-from .gpu_opt import (
-    PyUriTwc, 
+from .model import (
+    PyUriTwc,
     PyUriTwc_V2,
-    build_fiuri_twc, 
-    build_fiuri_twc_v2)
+    build_fiuri_twc_mcc,
+    build_fiuri_twc_invpen,
+    TWC_JSON)
 
-__all__ = ["PyUriTwc" , 
+__all__ = ["PyUriTwc" ,
            "PyUriTwc_V2",
-           "build_fiuri_twc",
-           "build_fiuri_twc_v2"]
+           "build_fiuri_twc_mcc",
+           "build_fiuri_twc_invpen",
+           "TWC_JSON"]

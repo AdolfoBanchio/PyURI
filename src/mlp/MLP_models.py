@@ -192,3 +192,85 @@ class TwinCritic(nn.Module):
         if is_3d:
             q1 = q1.view(B, T, 1)
         return q1
+
+
+class TwinCriticInvPen(nn.Module):
+    """
+    Twin Q-critic for InvertedPendulum-v5 (state_dim=4, action_dim=1).
+    Same architecture pattern as TwinCritic: two independent Q networks with
+    LayerNorm + ReLU hidden layers, orthogonal init. Supports 2-D (B, D)
+    and 3-D (B, T, D) inputs as required by TD3+BPTT updates.
+    """
+    def __init__(self, state_dim: int = 4, action_dim: int = 1, hidden_dim: int = 256):
+        super().__init__()
+
+        # Q1 Architecture
+        self.l1_1 = nn.Linear(state_dim + action_dim, hidden_dim)
+        self.ln1_1 = nn.LayerNorm(hidden_dim)
+        self.l2_1 = nn.Linear(hidden_dim, hidden_dim)
+        self.ln2_1 = nn.LayerNorm(hidden_dim)
+        self.l3_1 = nn.Linear(hidden_dim, 1)
+
+        # Q2 Architecture
+        self.l1_2 = nn.Linear(state_dim + action_dim, hidden_dim)
+        self.ln1_2 = nn.LayerNorm(hidden_dim)
+        self.l2_2 = nn.Linear(hidden_dim, hidden_dim)
+        self.ln2_2 = nn.LayerNorm(hidden_dim)
+        self.l3_2 = nn.Linear(hidden_dim, 1)
+
+        self.apply(self._init_weights)
+
+    def _init_weights(self, m):
+        if isinstance(m, nn.Linear):
+            nn.init.orthogonal_(m.weight, gain=nn.init.calculate_gain('relu'))
+            if m.bias is not None:
+                nn.init.zeros_(m.bias)
+
+    def forward(self, state, action):
+        device = self.l1_1.weight.device
+        state = state.to(device)
+        action = action.to(device)
+
+        is_3d = state.dim() == 3
+        if is_3d:
+            B, T, D_s = state.shape
+            _, _, D_a = action.shape
+            state = state.reshape(-1, D_s)
+            action = action.reshape(-1, D_a)
+
+        x1 = torch.cat([state, action], dim=-1)
+        x1 = F.relu(self.ln1_1(self.l1_1(x1)))
+        x1 = F.relu(self.ln2_1(self.l2_1(x1)))
+        q1 = self.l3_1(x1)
+
+        x2 = torch.cat([state, action], dim=-1)
+        x2 = F.relu(self.ln1_2(self.l1_2(x2)))
+        x2 = F.relu(self.ln2_2(self.l2_2(x2)))
+        q2 = self.l3_2(x2)
+
+        if is_3d:
+            q1 = q1.view(B, T, 1)
+            q2 = q2.view(B, T, 1)
+
+        return q1, q2
+
+    def q1_forward(self, state, action):
+        device = self.l1_1.weight.device
+        state = state.to(device)
+        action = action.to(device)
+
+        is_3d = state.dim() == 3
+        if is_3d:
+            B, T, D_s = state.shape
+            D_a = action.shape[-1]
+            state = state.reshape(-1, D_s)
+            action = action.reshape(-1, D_a)
+
+        x1 = torch.cat([state, action], dim=-1)
+        x1 = F.relu(self.ln1_1(self.l1_1(x1)))
+        x1 = F.relu(self.ln2_1(self.l2_1(x1)))
+        q1 = self.l3_1(x1)
+
+        if is_3d:
+            q1 = q1.view(B, T, 1)
+        return q1

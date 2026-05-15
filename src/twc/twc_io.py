@@ -24,9 +24,6 @@ OUT_VALLEY_VAL = 0.0
 OUT_MIN_VAL = -1.0
 OUT_MAX_VAL = 1.0
 
-# For alternative encoders (smooth gates)
-SMOOTH_GATE_SHARPNESS = 8.0
-
 def mcc_obs_to_potentials(obs: torch.Tensor, device=None) -> torch.Tensor:
     """Return potentials [PVD, PLM, AVM, ALM] matching original BinaryInterface.feedNN()."""
     ex_in, in_in = mcc_obs_encoder(obs, device=device)
@@ -106,4 +103,168 @@ def twc_out_2_mcc_action(y: torch.Tensor, fwd_idx: int = 1, rev_idx: int = 0, ga
     retval2 = bounded_affine(MIN_STATE, 0.0, MAX_STATE, -OUT_MIN_VAL, neg_St)
     
     # Return difference (matching ariel: retVal1 - retVal2)
+    return (retval1 - retval2).unsqueeze(1) * gain
+
+
+# ============================================================
+# InvertedPendulum-v5 interface
+#   obs = [cart_pos, pole_angle, cart_vel, pole_ang_vel]
+#   action in [-3, 3]
+# Neuron mapping (per spec):
+#   pole_angle >= 0 -> PLM (idx 1) ; pole_angle < 0 -> AVM (idx 2)
+#   cart_pos   >= 0 -> ALM (idx 3) ; cart_pos   < 0 -> PVD (idx 0)
+#   Action: FWD (idx 1) = push right (+) ; REV (idx 0) = push left (-)
+# ============================================================
+
+def ipen_obs_encoder(obs: torch.Tensor, device=None):
+    """
+    Encode InvertedPendulum-v5 observation to (ex_in, in_in) potentials.
+
+    Supports (B, 4) and (B, T, 4) shapes via `...` indexing.
+    Returns two tensors shaped (..., 4) with neuron-index order [PVD, PLM, AVM, ALM].
+    Values outside the saturation bounds clamp to ±MAX_STATE.
+    """        
+    # InvertedPendulum-v5 bounds
+    INVPEN_ANGLE_MAX = 0.2       # rad; symmetric (termination at |angle| > 0.2)
+    INVPEN_CART_MAX  = 1.0       # m; symmetric saturation for cart position
+    if device is None:
+        device = obs.device
+
+    cart_pos = obs[..., 0]
+    angle    = obs[..., 1]
+
+    min_fill = torch.full_like(cart_pos, MIN_STATE, device=device)
+    zero     = torch.zeros_like(cart_pos, device=device)
+
+    # --- Angle encoding (PLM / AVM) ---
+    angle_mask = angle >= 0
+    # Normalize |angle| into [0, 1] (clamped), then affine map to [MIN_STATE, MAX_STATE]
+    cor_angle = torch.clamp(torch.abs(angle) / INVPEN_ANGLE_MAX, 0.0, 1.0)
+    angle_pot = (MAX_STATE - MIN_STATE) * cor_angle + MIN_STATE
+
+    PLM_EX_input = torch.where(angle_mask, angle_pot, min_fill)
+    AVM_IN_input = torch.where(angle_mask, min_fill, angle_pot)
+
+    # --- Cart position encoding (ALM / PVD) ---
+    cart_mask = cart_pos >= 0
+    cor_cart = torch.clamp(torch.abs(cart_pos) / INVPEN_CART_MAX, 0.0, 1.0)
+    cart_pot = (MAX_STATE - MIN_STATE) * cor_cart + MIN_STATE
+
+    ALM_EX_input = torch.where(cart_mask, cart_pot, min_fill)
+    PVD_IN_input = torch.where(cart_mask, min_fill, cart_pot)
+
+    # Stack into (..., 4) with order [PVD, PLM, AVM, ALM]
+    ex_in = torch.stack([zero,         PLM_EX_input, zero,         ALM_EX_input], dim=-1)
+    in_in = torch.stack([PVD_IN_input, zero,         AVM_IN_input, zero        ], dim=-1)
+
+    return ex_in, in_in
+
+
+def ipen_obs_to_potentials(obs: torch.Tensor, device=None) -> torch.Tensor:
+    """Return potentials [PVD, PLM, AVM, ALM] for InvertedPendulum-v5."""
+    ex_in, in_in = ipen_obs_encoder(obs, device=device)
+    return ex_in + in_in
+
+
+def _sign_split_potential(signal: torch.Tensor,
+                          saturation: float,
+                          device: torch.device):
+    """
+    Split a signed scalar signal into two positive potentials:
+        pos_pot: active (in [MIN_STATE, MAX_STATE]) when signal >= 0, else MIN_STATE
+        neg_pot: active (in [MIN_STATE, MAX_STATE]) when signal <  0, else MIN_STATE
+ 
+    The mapping is affine: |signal| / saturation -> [0, 1] -> [MIN_STATE, MAX_STATE].
+    Values beyond saturation clamp to MAX_STATE.
+ 
+    Returns (pos_pot, neg_pot) both shaped like `signal`.
+    """
+    min_fill = torch.full_like(signal, MIN_STATE, device=device)
+    pos_mask = signal >= 0.0
+ 
+    magnitude = torch.clamp(torch.abs(signal) / saturation, 0.0, 1.0)
+    potential = (MAX_STATE - MIN_STATE) * magnitude + MIN_STATE
+ 
+    pos_pot = torch.where(pos_mask, potential, min_fill)
+    neg_pot = torch.where(~pos_mask, potential, min_fill)
+ 
+    return pos_pot, neg_pot
+
+def ipen_obs_to_potentials_v2(obs: torch.Tensor, device=None) -> torch.Tensor:
+    """
+    Encode InvertedPendulum-v5 obs to a (B, 4) or (B, T, 4) potential tensor.
+ 
+    Neuron order: [PVD=0, PLM=1, AVM=2, ALM=3]
+ 
+    Slot mapping:
+        PLM (1): angle >= 0  (excitatory-dominant path to AVD/AVA → FWD)
+        AVM (2): angle <  0  (inhibitory path to PVC/AVD → REV bias)
+        PVD (0): combined_vel >= 0  (inhibits AVA → reduces REV)
+        ALM (3): combined_vel <  0  (excites AVD → increases FWD)
+ 
+    Args:
+        obs:    (..., 4) tensor [cart_pos, pole_angle, cart_vel, pole_ang_vel]
+        device: target device; defaults to obs.device
+ 
+    Returns:
+        (..., 4) potential tensor ready to be injected into PyUriTwc.forward_step
+    """
+    # InvertedPendulum-v5 saturation bounds
+    IPEN_ANGLE_MAX:    float = 0.2    # rad — termination boundary
+    IPEN_ANG_VEL_MAX:  float = 5.0   # rad/s — practical saturation
+    IPEN_CART_VEL_MAX: float = 5.0   # m/s   — practical saturation
+    
+    # Blending weights for the velocity composite (must sum to 1.0)
+    W_ANG_VEL:  float = 0.7
+    W_CART_VEL: float = 0.3
+
+    if device is None:
+        device = obs.device
+ 
+    pole_angle   = obs[..., 1]
+    cart_vel     = obs[..., 2]
+    pole_ang_vel = obs[..., 3]
+ 
+    # ── Angle encoding → PLM / AVM ───────────────────────────────────────────
+    PLM_pot, AVM_pot = _sign_split_potential(pole_angle, IPEN_ANGLE_MAX, device)
+    # PLM active when angle >= 0  (pole tilts right)
+    # AVM active when angle <  0  (pole tilts left)
+ 
+    # ── Velocity composite → PVD / ALM ───────────────────────────────────────
+    # Normalise each component to [-1, 1] before blending so their scales
+    # are commensurable regardless of the physical units.
+    ang_vel_norm  = torch.clamp(pole_ang_vel / IPEN_ANG_VEL_MAX,  -1.0, 1.0)
+    cart_vel_norm = torch.clamp(cart_vel     / IPEN_CART_VEL_MAX, -1.0, 1.0)
+ 
+    combined_vel = W_ANG_VEL * ang_vel_norm + W_CART_VEL * cart_vel_norm
+    # combined_vel in [-1, 1]; saturation = 1.0 so the affine map is direct
+    PVD_pot, ALM_pot = _sign_split_potential(combined_vel, 1.0, device)
+    # PVD active when combined_vel >= 0  (pole + cart moving right)
+    # ALM active when combined_vel <  0  (pole + cart moving left)
+ 
+    # ── Stack in TWC neuron order [PVD=0, PLM=1, AVM=2, ALM=3] ──────────────
+    return torch.stack([PVD_pot, PLM_pot, AVM_pot, ALM_pot], dim=-1)
+
+
+INVPEN_OUT_MIN   = -3.0      # action saturation (push left)
+INVPEN_OUT_MAX   = 3.0       # action saturation (push right)
+def twc_out_2_invpen_action(y: torch.Tensor, fwd_idx: int = 1, rev_idx: int = 0, gain: float = 1.0):
+    """
+    Decode output neuron states to a continuous action in [-3, 3].
+
+    Args:
+        y: (B, 2) tensor with output internal states [REV, FWD]
+        fwd_idx: FWD index (push right, positive action)
+        rev_idx: REV index (push left, negative action)
+        gain: optional gain multiplier
+
+    Returns:
+        (B, 1) action tensor in [INVPEN_OUT_MIN, INVPEN_OUT_MAX] = [-3, 3]
+    """
+    neg_St = y[:, rev_idx]
+    pos_St = y[:, fwd_idx]
+
+    retval1 = bounded_affine(MIN_STATE, 0.0, MAX_STATE, INVPEN_OUT_MAX, pos_St)
+    retval2 = bounded_affine(MIN_STATE, 0.0, MAX_STATE, -INVPEN_OUT_MIN, neg_St)
+
     return (retval1 - retval2).unsqueeze(1) * gain

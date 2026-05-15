@@ -17,7 +17,7 @@ from torch.utils.tensorboard import SummaryWriter
 from datetime import datetime
 from utils import OUNoise, SequenceBuffer
 from mlp import TwinCritic
-from fiuri import build_fiuri_twc
+from fiuri import build_fiuri_twc_mcc
 from td3_flat import TD3Engine, TD3Config, td3_train
 import fcntl
 
@@ -53,6 +53,25 @@ def bootstrap_enqueue_once(study: optuna.Study, best_configs, best_seeds, lock_p
         study._storage.set_study_system_attr(study._study_id, "bootstrap_done", True)
 
         fcntl.flock(f, fcntl.LOCK_UN)
+
+def phi_mcc(obs):
+    # Potential shaping (pos only). Keeps your original behavior.
+    pos = obs[0]
+    pos_min, pos_max = -1.2, 0.6
+    x = (pos - pos_min) / (pos_max - pos_min)
+    return 4 * float(np.clip(x, 0.0, 1.0))
+
+def mcc_score_fn(m_ret, s_rate, s_suc, m_act, all_scores, all_steps):
+    # Calculamos las medias de la ventana (6)
+        window_rew = np.mean(all_scores[-6:])
+        # Si avg_steps es inf (no llegó), le asignamos el máximo del entorno (1000)
+        clean_steps = [s if np.isfinite(s) else 1000 for s in all_steps[-6:]]
+        window_steps = np.mean(clean_steps)
+
+        step_penalty = max(0, (window_steps - 200) * 0.1)
+        current_combined_score = window_rew - step_penalty
+
+        return current_combined_score
 
 def objective(trial: optuna.Trial, study_name: str):
     cfg = TD3Config()
@@ -132,7 +151,7 @@ def objective(trial: optuna.Trial, study_name: str):
         f.write(cfg.to_json())
 
     try:
-        all_eval_scores, all_eval_steps,best_model_path = td3_train(
+        all_eval_scores, all_eval_steps,best_model_path =     td3_train(
             env=env,
             replay_buf=replay_buf,
             engine=engine,
@@ -140,6 +159,9 @@ def objective(trial: optuna.Trial, study_name: str):
             timestamp=timestamp,
             config=cfg,
             trial=trial,
+            phi=phi_mcc,
+            model_score_fn=mcc_score_fn,
+            log_interval=200
         )
 
         # Tomamos los últimos 6 resultados de estabilidad
