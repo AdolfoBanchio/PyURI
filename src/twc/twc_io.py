@@ -245,6 +245,46 @@ def ipen_obs_to_potentials_v2(obs: torch.Tensor, device=None) -> torch.Tensor:
     # ── Stack in TWC neuron order [PVD=0, PLM=1, AVM=2, ALM=3] ──────────────
     return torch.stack([PVD_pot, PLM_pot, AVM_pot, ALM_pot], dim=-1)
 
+def ipen_obs_to_potentials_v3(obs: torch.Tensor, device=None) -> torch.Tensor:
+    """  
+    for each neuron it mimics this encoding:
+        corVal = self.value/self.maxValue
+        posPot = (self.maxState-self.minState)*corVal+self.minState
+        self.sensorialNeuron.setInternalState(posPot)
+        self.sensorialNeuron.setOutputState(posPot)
+    with:
+    - PLM: Pole angle
+    - AVM: Pole angular velocity
+    - ALM: linear pos
+    - PVD: linear velocity
+    """
+    # Saturation bounds chosen so each obs uses a meaningful slice of the
+    # [MIN_STATE, MAX_STATE] potential range during typical play.
+    POLE_ANGLE_MAX = 0.2268   # rad — slight margin over the |angle|>0.2 termination
+    POLE_VEL_MAX   = 5.0      # rad/s — practical saturation observed during play
+    CART_POS_MAX   = 1.0      # m   — matches the |cart_pos|>1 termination boundary
+    CART_VEL_MAX   = 5.0      # m/s — practical saturation observed during play
+
+    if device is None:
+        device = obs.device
+
+    cart_pos = obs[..., 0]
+    pole_angle = obs[..., 1]
+    cart_vel = obs[..., 2]
+    pole_ang_vel = obs[..., 3]
+
+    def encode_signal(signal: torch.Tensor, saturation: float) -> torch.Tensor:
+        cor_val = signal / saturation
+        pot = (MAX_STATE - MIN_STATE) * cor_val + MIN_STATE
+        return torch.clamp(pot, min=MIN_STATE, max=MAX_STATE)
+
+    PLM_pot = encode_signal(pole_angle, POLE_ANGLE_MAX)
+    AVM_pot = encode_signal(pole_ang_vel, POLE_VEL_MAX)
+    ALM_pot = encode_signal(cart_pos, CART_POS_MAX)
+    PVD_pot = encode_signal(cart_vel, CART_VEL_MAX)
+
+    return torch.stack([PVD_pot, PLM_pot, AVM_pot, ALM_pot], dim=-1)
+
 
 INVPEN_OUT_MIN   = -3.0      # action saturation (push left)
 INVPEN_OUT_MAX   = 3.0       # action saturation (push right)
@@ -268,3 +308,37 @@ def twc_out_2_invpen_action(y: torch.Tensor, fwd_idx: int = 1, rev_idx: int = 0,
     retval2 = bounded_affine(MIN_STATE, 0.0, MAX_STATE, -INVPEN_OUT_MIN, neg_St)
 
     return (retval1 - retval2).unsqueeze(1) * gain
+
+INVPEN_PPO_OUT_MIN = -3.0
+INVPEN_PPO_OUT_MAX =  3.0
+def twc_out_2_invpen_mean(
+    y: torch.Tensor,
+    fwd_idx: int = 1,
+    rev_idx: int = 0,
+) -> torch.Tensor:
+    """
+    Decode TWC output neuron states to a continuous action *mean* in [-3, 3].
+ 
+    Identical arithmetic to ``twc_out_2_invpen_action`` but intended for use
+    as the mean of a Gaussian policy inside PPOEngine.  The caller is
+    responsible for adding Gaussian noise and computing log-probabilities.
+ 
+    Unlike the TD3 decoder this function does **not** accept a ``gain``
+    argument — scaling is handled by the Gaussian std in PPOEngine.
+ 
+    Args:
+        y:       (..., 2) tensor with output internal states [..., REV, FWD].
+                 Supports any leading batch/time dimensions.
+        fwd_idx: Column index of the FWD (push-right) neuron.
+        rev_idx: Column index of the REV (push-left) neuron.
+ 
+    Returns:
+        (..., 1) action mean tensor in [INVPEN_PPO_OUT_MIN, INVPEN_PPO_OUT_MAX].
+    """
+    neg_st = y[..., rev_idx]   # REV — push left
+    pos_st = y[..., fwd_idx]   # FWD — push right
+ 
+    retval1 = bounded_affine(MIN_STATE, 0.0, MAX_STATE, INVPEN_PPO_OUT_MAX,  pos_st)
+    retval2 = bounded_affine(MIN_STATE, 0.0, MAX_STATE, -INVPEN_PPO_OUT_MIN, neg_st)
+ 
+    return (retval1 - retval2).unsqueeze(-1)   # (..., 1)

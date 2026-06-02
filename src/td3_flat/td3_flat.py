@@ -17,7 +17,7 @@ from dataclasses import dataclass, asdict
 from torch.utils.tensorboard import SummaryWriter
 from optuna.trial import TrialState
 from tqdm import tqdm
-from utils import OUNoise, SequenceBuffer
+from utils import OUNoise, GaussianNoise, SequenceBuffer
 from mlp import TwinCritic
 from fiuri import PyUriTwc
 
@@ -49,11 +49,19 @@ class TD3Config:
     target_noise: float = 0.2
     noise_clip: float = 0.5
 
+    # Exploration noise: "ou" (default, used by MCC scripts) or "gaussian"
+    noise_type: str = "ou"
+
     # OU Noise Parameters
     ou_theta: float = 0.15
     ou_sigma_init: float = 0.5
     ou_sigma_end: float = 0.1
     ou_sigma_decay_steps: int = 100_000
+
+    # Gaussian Noise Parameters (used when noise_type == "gaussian")
+    gaussian_sigma_init: float = 0.5
+    gaussian_sigma_end: float = 0.15
+    gaussian_sigma_decay_steps: int = 250_000
 
     critic_hidden_layers: int = 256
     replay_buffer_size: int = 100_000
@@ -63,7 +71,18 @@ class TD3Config:
     steepness_gj: float = 7.0
     steepness_input: float = 5.0
     input_thresh: float = 0.001
-    
+
+    # CalibratedActor output-head calibration (used by the InvPen SG path)
+    calib_target_std: float = 1.5
+    calib_max_scale:  float = 5.0
+
+    # Per-group gradient clipping for the recurrent TWC actor. The single
+    # joint clip used to let the (large) decay/threshold gradients suppress
+    # the weight updates; per-group clipping decouples that.
+    max_grad_norm_weights:    float = 1.0
+    max_grad_norm_thresholds: float = 0.5
+    max_grad_norm_decay:      float = 0.5
+
     model_prefix: str = "td3_flat_actor"
 
     def to_json(self) -> str:
@@ -107,6 +126,9 @@ class TD3Engine:
         policy_delay: int = 2,
         target_policy_noise: float = 0.2,
         target_noise_clip: float = 0.5,
+        max_grad_norm_weights:    float = 1.0,
+        max_grad_norm_thresholds: float = 0.5,
+        max_grad_norm_decay:      float = 0.5,
         device: torch.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu'),
     ):
         self.gamma = float(gamma)
@@ -131,10 +153,29 @@ class TD3Engine:
         self.target_policy_noise = float(target_policy_noise)
         self.target_noise_clip = float(target_noise_clip)
 
+        self.max_grad_norm_weights    = float(max_grad_norm_weights)
+        self.max_grad_norm_thresholds = float(max_grad_norm_thresholds)
+        self.max_grad_norm_decay      = float(max_grad_norm_decay)
+
         self.action_low = torch.as_tensor(self.act_space.low, device=self.device, dtype=torch.float32)
         self.action_high = torch.as_tensor(self.act_space.high, device=self.device, dtype=torch.float32)
 
         self.total_updates = 0
+
+    def _actor_param_groups(self):
+        """
+        Return (weights_group, thresholds_group, decay_group) for per-group
+        gradient clipping. Works for both bare ``PyUriTwc`` actors and
+        ``CalibratedActor`` wrappers (in which case the head params are
+        bundled with the weights group).
+        """
+        if hasattr(self.actor, "base"):
+            base = self.actor.base
+            head = [self.actor.action_scale, self.actor.action_bias]
+        else:
+            base = self.actor
+            head = []
+        return ([base.weights] + head, [base.thresholds], [base.decay])
 
     @torch.no_grad()
     def soft_update(self, target_net, online_net):
@@ -208,7 +249,11 @@ class TD3Engine:
 
             self.actor_optimizer.zero_grad(set_to_none=True)
             actor_loss.backward()
-            torch.nn.utils.clip_grad_norm_(self.actor.parameters(), 1.0)
+            # Per-group gradient clipping (see _actor_param_groups).
+            w_grp, th_grp, dc_grp = self._actor_param_groups()
+            torch.nn.utils.clip_grad_norm_(w_grp,  self.max_grad_norm_weights)
+            torch.nn.utils.clip_grad_norm_(th_grp, self.max_grad_norm_thresholds)
+            torch.nn.utils.clip_grad_norm_(dc_grp, self.max_grad_norm_decay)
             self.actor_optimizer.step()
 
             self.soft_update(self.actor_target, self.actor)
@@ -318,7 +363,13 @@ def td3_train(
     pruning_window = deque(maxlen=6)
     all_eval_scores = []
     all_eval_steps = []
-    ou_noise = OUNoise(env.action_space.shape[0], config)
+    # Exploration noise: default OU keeps existing MCC scripts untouched;
+    # set config.noise_type="gaussian" for the InvPen + CalibratedActor path.
+    noise_type = getattr(config, "noise_type", "ou")
+    if noise_type == "gaussian":
+        ou_noise = GaussianNoise(env.action_space.shape[0], config)
+    else:
+        ou_noise = OUNoise(env.action_space.shape[0], config)
     actor_loss, critic_loss = None, None
     # initial model save
     initial_path = os.path.join(writer.log_dir, f"{config.model_prefix}_first_{timestamp}.pth")
@@ -375,7 +426,7 @@ def td3_train(
                 if total_steps % log_interval == 0 and actor_loss is not None:
                     writer.add_scalar("Loss/Actor", actor_loss, total_steps)
                     writer.add_scalar("Loss/Critic", critic_loss, total_steps)
-                    writer.add_scalar("Training/OUNoise_sigma", ou_noise.sigma, total_steps)
+                    writer.add_scalar("Training/Noise_sigma", ou_noise.sigma, total_steps)
 
         pbar.update(steps)
 

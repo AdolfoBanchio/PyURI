@@ -52,12 +52,14 @@ class PyUriTwc(nn.Module):
     def __init__(self, 
                  config_json: dict, 
                  obs_encoder: callable, 
-                 action_decoder: callable, 
+                 action_decoder: callable,
+                 internal_steps: int = 1,
                  device=None):
         super().__init__()
         self.obs_encoder = obs_encoder
         self.action_decoder = action_decoder
-        
+        self.internal_steps = internal_steps
+
         self.neuron_names = config_json['neurons'] 
         self.num_neurons = len(self.neuron_names)
         
@@ -85,7 +87,7 @@ class PyUriTwc(nn.Module):
         mask[self.input_indices] = True
         self.register_buffer('input_bool_mask', mask)
         self.register_buffer('input_idx_base', torch.tensor(self.input_indices))
-
+        
         # --- Parameters ---
         self.weights = nn.Parameter(torch.empty(self.num_neurons, self.num_neurons)) 
         self.thresholds = nn.Parameter(torch.empty(self.num_neurons))                
@@ -244,9 +246,15 @@ class PyUriTwc(nn.Module):
         state_O_hybrid = (state_O * non_input_mask) + input_layer_state
         state_E_hybrid = (state_E * non_input_mask) + input_layer_state
 
-        # Neurons update step
-        O_calc, E_calc = self._physics_step(state_E_hybrid, state_O_hybrid)
-
+        E_iter, O_iter = state_E_hybrid, state_O_hybrid
+        # Neurons update step (iterated so signal can propagate through the circuit)
+        for _ in range(self.internal_steps):
+            # re-clamp sensory neurons to input values at each internal step
+            E_iter = (E_iter * non_input_mask) + input_layer_state
+            O_iter = (O_iter * non_input_mask) + input_layer_state
+            O_iter, E_iter = self._physics_step(E_iter, O_iter)
+        O_calc, E_calc = O_iter, E_iter
+        
         O_new = (O_calc * non_input_mask) + input_layer_state
         E_new = (E_calc * non_input_mask) + input_layer_state
 
@@ -303,6 +311,7 @@ class PyUriTwc_V2(PyUriTwc):
                  config_json: dict,
                  obs_encoder: callable,
                  action_decoder: callable,
+                 internal_steps: int = 1,
                  steepness_gj: float = 10.0,
                  steepness_fire: float = 10.0,
                  steepness_input: float = 5.0,
@@ -312,6 +321,7 @@ class PyUriTwc_V2(PyUriTwc):
         super().__init__(config_json=config_json,
                          obs_encoder=obs_encoder,
                          action_decoder=action_decoder,
+                         internal_steps=internal_steps,
                          device=device)
 
         # Surrogate-gradient hyperparameters
@@ -356,6 +366,92 @@ class PyUriTwc_V2(PyUriTwc):
         E_new = firing_gate * val_E_fired + (1 - firing_gate) * E_nonfired
 
         return O_new, E_new
+
+
+class CalibratedActor(nn.Module):
+    """
+    Wraps a TWC actor with a learnable affine output head.
+
+    ``forward(obs) = base(obs) * action_scale + action_bias`` — the wrapper
+    returns the action to execute directly, so engines using it don't need
+    a Gaussian/log_std policy layer.
+
+    ``calibrate(env)`` fits ``action_scale`` and ``action_bias`` from a
+    random-action rollout so the post-affine policy mean has mean ≈ 0 and
+    std ≈ ``target_std`` per dim, with ``action_scale`` capped at
+    ``max_scale`` to keep the head from dominating the base actor.
+    """
+
+    def __init__(self, base_actor: "PyUriTwc", action_dim: int):
+        super().__init__()
+        self.base         = base_actor
+        self.action_scale = nn.Parameter(torch.ones(action_dim))
+        self.action_bias  = nn.Parameter(torch.zeros(action_dim))
+
+    def forward(self, obs):
+        return self.base(obs) * self.action_scale + self.action_bias
+
+    def forward_bptt(self, obs_sequence, initial_state=None):
+        actions, final_state = self.base.forward_bptt(obs_sequence, initial_state)
+        return actions * self.action_scale + self.action_bias, final_state
+
+    def reset(self, batch_size: int = 1):
+        self.base.reset(batch_size)
+
+    def reset_internal_only(self, batch_size: int = 1):
+        self.base.reset_internal_only(batch_size)
+
+    def get_initial_state(self, batch_size: int, device=None):
+        return self.base.get_initial_state(batch_size, device)
+
+    @torch.no_grad()
+    def calibrate(self, env, n_samples: int = 512,
+                  target_std: float = 1.5, max_scale: float = 5.0) -> dict:
+        """
+        Fit (action_scale, action_bias) on observations from a short
+        random-action rollout. Returns a dict of diagnostic scalars.
+        """
+        import numpy as np  # local import to avoid touching module-level imports
+        was_training = self.training
+        self.eval()
+
+        obs_buf = []
+        obs, _ = env.reset()
+        while len(obs_buf) < n_samples:
+            obs_buf.append(np.asarray(obs, dtype=np.float32))
+            a = env.action_space.sample()
+            obs, _, term, trunc, _ = env.step(a)
+            if term or trunc:
+                obs, _ = env.reset()
+
+        device    = self.action_scale.device
+        obs_batch = torch.as_tensor(np.stack(obs_buf[:n_samples]),
+                                    dtype=torch.float32).to(device)
+
+        self.base.reset(batch_size=obs_batch.shape[0])
+        raw = self.base(obs_batch)                # (N, action_dim)
+        self.base.reset(batch_size=1)
+
+        raw_mean       = raw.mean(dim=0)
+        raw_std        = raw.std(dim=0).clamp_min(1e-3)
+        uncapped_scale = (target_std / raw_std)
+        new_scale      = uncapped_scale.clamp(max=max_scale)
+        new_bias       = -new_scale * raw_mean
+
+        self.action_scale.data.copy_(new_scale.to(self.action_scale.device))
+        self.action_bias.data.copy_(new_bias.to(self.action_bias.device))
+
+        if was_training:
+            self.train()
+
+        return {
+            "calib/raw_mean":       float(raw_mean.abs().mean().item()),
+            "calib/raw_std":        float(raw_std.mean().item()),
+            "calib/uncapped_scale": float(uncapped_scale.mean().item()),
+            "calib/action_scale":   float(new_scale.mean().item()),
+            "calib/action_bias":    float(new_bias.mean().item()),
+            "calib/scale_capped":   float((uncapped_scale > max_scale).float().mean().item()),
+        }
 
 
 def build_fiuri_twc_mcc():
